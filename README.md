@@ -2,7 +2,7 @@
 
 A WoW Forever (Interface 16001) addon for keeping an account-wide list of players you've met. Each player gets:
 
-- a face: :) happy, :| meh, :( avoid
+- a face: green happy, yellow meh, or red avoid (written :) :| :( below)
 - a role: tank, healer, DPS or none
 - a note
 
@@ -19,7 +19,8 @@ To share lists, both players need the addon (see [Sharing](#sharing--lists)).
 - Right-click a player (unit frame, target, party/raid, chat name, friends, guild, recent allies) and choose **SnogMarryAvoid**. The window opens with that player filled in. If they're already tagged, the menu entry shows their face.
 - The minimap button (drag it around the minimap edge) and the addon compartment entry both open the window. `/sma minimap` hides or shows the button.
 - `/sma` toggles the window. `/sma target` opens your target. `/sma <name>` opens or adds a player by name.
-- Click a row in the list to edit it. Save, Delete, or New to start a blank entry. Enter in either text box saves.
+- **Edit:** click a row, or its **Edit** button, to load it into the editor at the top (the row is highlighted). Change the face, role or note and press **Save**. For a new player, **New** clears the editor and the button reads **Add**. Enter in either text box saves.
+- **Delete:** **Delete** in the editor removes the entry being edited. To remove several, tick the checkboxes next to the names (the top checkbox ticks all) and press **Delete selected**. **Delete all** removes your own entries and every received list. Both ask for confirmation first.
 
 ## :( players
 
@@ -68,6 +69,10 @@ Forever uses regional unique names ("First Surname", no realm). Blizzard sometim
 - `inbox[senderKey] = { from, via = "direct"|"guild", updated, entries = { [playerKey] = { name, role, note } } }`: lists received from others.
 - `dismissed[playerKey] = true`: received entries you deleted.
 - `guildShare`: guild opt-in. `minimap = { angle, hide }`.
+
+## Face icons
+
+`Media/happy.tga`, `meh.tga` and `avoid.tga` are 64x64 TGAs drawn by `tools/make_faces.lua`. To regenerate them, run `lua tools/make_faces.lua` from the addon folder. Pass a folder as an argument to also get BMP previews. `tools/` is left out of release zips.
 
 ## Deploy
 

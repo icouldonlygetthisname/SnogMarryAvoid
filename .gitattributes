@@ -1,2 +1,4 @@
 * text=auto
 .gitattributes export-ignore
+tools/ export-ignore
+*.tga binary
