@@ -20,6 +20,17 @@ A WoW Forever (Interface 16001) addon for keeping an account-wide list of player
 
 **Caveat: Battle.net friends can't be blocked.** If a :( player is on your Battle.net friends list, invites in both directions go through as normal, and the window shows a red warning next to the faces. A friend is recognised by GUID, or by character name while they're online. An offline Battle.net friend tagged only by name can't be matched, but they also can't invite you while offline.
 
+## Sharing your :( list
+
+Manual push only. Nothing is sent or received unless both sides act.
+
+- Send with `/sma share <name>` (or `/sma share` for your target), the **Share** button in the window, or **Share my :( list** in a player's right-click menu.
+- The other player needs SnogMarryAvoid. They get a popup and nothing is sent until they click Accept. Offers expire after 2 minutes.
+- Only your own :( entries are sent (name, role, note). Your :) and :| entries stay private, and entries you received from others are never passed on.
+- Received entries are stored separately (`SnogMarryAvoidDB.shared`) and show in the list with a grey "from <friend>". They block invites like your own :( entries. Your own entry for the same player always wins, so if you've tagged someone :) a friend's :( won't block them.
+- Click a received entry to view it. **Save** adopts it as your own entry, and **Delete** removes it.
+- Messages are whispered addon messages, sent in a throttled queue. Sending may fail in combat or in instances. You get a chat message if it does, so try again outside.
+
 ## Names
 
 Forever uses regional unique names ("First Surname", no realm). Blizzard sometimes passes them as "First-Surname", so both forms map to the same entry (case-insensitive). On clients without regional names, entries are keyed by `Name-Realm`.

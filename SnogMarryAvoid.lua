@@ -128,9 +128,18 @@ function SMA:GetByGUID(guid)
 	end
 end
 
+-- Avoid entries received from friends. Kept apart from your own and never override them.
+function SMA:GetShared(name)
+	local key = Key(name)
+	return key and db.shared[key], key
+end
+
+-- Your own entry decides if you have one; otherwise a friend's shared :( entry counts.
 function SMA:IsAvoided(name, guid)
 	local entry = self:Get(name) or self:GetByGUID(guid)
-	return entry ~= nil and entry.face == FACE_AVOID, entry
+	if entry then return entry.face == FACE_AVOID, entry end
+	local shared = name and self:GetShared(name)
+	return shared ~= nil, shared
 end
 
 -- Battle.net friends are never blocked. Matched by GUID when we have one, else by character name
@@ -161,6 +170,11 @@ end
 local function FaceText(face)
 	local f = FACES[face]
 	return f and ("|c" .. f.color .. f.text .. "|r") or ""
+end
+
+-- Text from other players is shown escaped so it can't inject links, textures or colours.
+local function Escape(s)
+	return (s or ""):gsub("|", "||")
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -209,15 +223,23 @@ end
 -- Fill the editor with a player (existing entry or a new one).
 function SMA:Load(name, guid)
 	local f = self:GetFrame()
-	local entry, key = nil, nil
+	local entry, key, shared = nil, nil, nil
 	if name then entry, key = self:Get(name) end
+	if name and not entry then shared = self:GetShared(name) end
 	f.editKey = entry and key or nil
+	f.sharedKey = shared and key or nil
 	f.guid = guid or (entry and entry.guid) or nil
-	f.nameBox:SetText(entry and entry.name or DisplayName(name) or "")
-	f.noteBox:SetText(entry and entry.note or "")
-	self:SetFace(entry and entry.face or 1)
-	self:SetRole(entry and entry.role or nil)
-	f.deleteButton:SetEnabled(entry ~= nil)
+	local source = entry or shared
+	f.nameBox:SetText(source and source.name or DisplayName(name) or "")
+	f.noteBox:SetText(source and source.note or "")
+	self:SetFace(entry and entry.face or (shared and FACE_AVOID) or 1)
+	self:SetRole(source and source.role or nil)
+	f.deleteButton:SetEnabled(source ~= nil)
+	if shared then
+		f.sourceText:SetText("Shared by " .. Escape(shared.from) .. ". Save to make it yours.")
+	else
+		f.sourceText:SetText("")
+	end
 	f.nameBox:ClearFocus()
 	f.noteBox:ClearFocus()
 end
@@ -234,6 +256,7 @@ function SMA:Save()
 	if f.editKey and f.editKey ~= key then
 		db.players[f.editKey] = nil
 	end
+	db.shared[key] = nil -- adopted: your own entry replaces the shared one
 	db.players[key] = {
 		name = name,
 		face = f.face or 1,
@@ -249,6 +272,8 @@ end
 function SMA:Delete()
 	if frame.editKey then
 		db.players[frame.editKey] = nil
+	elseif frame.sharedKey then
+		db.shared[frame.sharedKey] = nil
 	end
 	self:Load(nil)
 	self:Refresh()
@@ -259,6 +284,11 @@ function SMA:Refresh()
 	local list = {}
 	for _, entry in pairs(db.players) do
 		list[#list + 1] = entry
+	end
+	for key, shared in pairs(db.shared) do
+		if not db.players[key] then
+			list[#list + 1] = { name = shared.name, face = FACE_AVOID, role = shared.role, note = shared.note, from = shared.from }
+		end
 	end
 	table.sort(list, function(a, b)
 		if a.face ~= b.face then return a.face < b.face end
@@ -298,8 +328,13 @@ local function InitRow(row, entry)
 	else
 		row.roleIcon:Hide()
 	end
-	row.nameText:SetText(entry.name)
-	row.noteText:SetText(entry.note or "")
+	if entry.from then
+		row.nameText:SetText(Escape(entry.name))
+		row.noteText:SetText("|cff888888from " .. Escape(entry.from) .. "|r  " .. Escape(entry.note))
+	else
+		row.nameText:SetText(entry.name)
+		row.noteText:SetText(entry.note or "")
+	end
 end
 
 function SMA:GetFrame()
@@ -382,21 +417,36 @@ function SMA:GetFrame()
 	f.noteBox:SetScript("OnEnterPressed", function() SMA:Save() end)
 
 	-- Actions
-	local save = MakeButton(f, SAVE or "Save", 90)
+	local save = MakeButton(f, SAVE or "Save", 80)
 	save:SetPoint("TOPLEFT", 70, -156)
 	save:SetScript("OnClick", function() SMA:Save() end)
 
-	f.deleteButton = MakeButton(f, DELETE or "Delete", 90)
+	f.deleteButton = MakeButton(f, DELETE or "Delete", 80)
 	f.deleteButton:SetPoint("LEFT", save, "RIGHT", 6, 0)
 	f.deleteButton:SetScript("OnClick", function() SMA:Delete() end)
 
-	local new = MakeButton(f, "New", 90)
+	local new = MakeButton(f, "New", 80)
 	new:SetPoint("LEFT", f.deleteButton, "RIGHT", 6, 0)
 	new:SetScript("OnClick", function() SMA:Load(nil); f.nameBox:SetFocus() end)
+
+	local share = MakeButton(f, "Share", 80)
+	share:SetPoint("LEFT", new, "RIGHT", 6, 0)
+	share:SetScript("OnClick", function() StaticPopup_Show("SNOGMARRYAVOID_SHARE") end)
+	share:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Share your :( list")
+		GameTooltip:AddLine("Sends your own avoid entries to another player with SnogMarryAvoid. They have to accept first.", 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	share:SetScript("OnLeave", GameTooltip_Hide)
 
 	-- List
 	f.countText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	f.countText:SetPoint("TOPLEFT", 16, -192)
+
+	f.sourceText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	f.sourceText:SetPoint("TOPRIGHT", -16, -192)
+	f.sourceText:SetJustifyH("RIGHT")
 
 	f.scrollBox = CreateFrame("Frame", nil, f, "WowScrollBoxList")
 	f.scrollBox:SetPoint("TOPLEFT", 12, -208)
@@ -440,10 +490,12 @@ local function AddMenuEntries()
 			local name, guid = NameFromContext(contextData)
 			if not name then return end
 			local entry = SMA:Get(name)
+			local face = entry and entry.face or (SMA:GetShared(name) and FACE_AVOID)
 			local text = "SnogMarryAvoid"
-			if entry then text = FaceText(entry.face) .. " " .. text end
+			if face then text = FaceText(face) .. " " .. text end
 			rootDescription:CreateDivider()
 			rootDescription:CreateButton(text, function() SMA:Open(name, guid) end)
+			rootDescription:CreateButton("Share my " .. FaceText(FACE_AVOID) .. " list", function() SMA:Share(name) end)
 		end)
 	end
 end
@@ -495,6 +547,186 @@ local function OnPartyInviteRequest(name, ...)
 	C_Timer.After(0, HideInvitePopups) -- in case Blizzard's handler runs after ours
 	Print(FaceText(FACE_AVOID) .. " Declined a group invite from " .. (DisplayName(name) or "an avoided player") .. ".")
 end
+
+----------------------------------------------------------------------------------------------------
+-- Sharing (manual push, receiver must accept)
+----------------------------------------------------------------------------------------------------
+-- Protocol, all WHISPER addon messages on COMM_PREFIX, fields separated by tabs:
+--   OFFER <count>                 sender -> receiver, receiver gets an accept popup
+--   ACCEPT / DECLINE              receiver -> sender
+--   E <name> <role> <note>        one avoid entry (sender -> receiver, only after ACCEPT)
+--   END                           sender -> receiver
+-- Only your own :( entries are sent; entries received from friends are never passed on.
+
+local COMM_PREFIX = "SnogMarryAvoid"
+local MAX_MSG = 255
+local OFFER_TTL = 120
+
+local outgoingOffers = {} -- [receiverKey] = expiry time
+local incoming = {}       -- [senderKey] = { expires, count }
+local sendQueue = {}
+local sendTicker
+
+local THROTTLED = Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.AddonMessageThrottle
+local SUCCESS = Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success
+
+-- Cut a string to maxBytes without splitting a UTF-8 character.
+local function TruncateUTF8(s, maxBytes)
+	if #s <= maxBytes then return s end
+	s = s:sub(1, maxBytes)
+	local i = #s
+	while i > 0 and s:byte(i) >= 0x80 and s:byte(i) < 0xC0 do i = i - 1 end
+	if i > 0 and s:byte(i) >= 0xC0 then
+		local lead = s:byte(i)
+		local len = lead >= 0xF0 and 4 or lead >= 0xE0 and 3 or 2
+		if #s - i + 1 < len then s = s:sub(1, i - 1) end
+	end
+	return s
+end
+
+local function ProcessSendQueue()
+	local item = sendQueue[1]
+	if not item then
+		sendTicker:Cancel()
+		sendTicker = nil
+		return
+	end
+	local result = C_ChatInfo.SendAddonMessage(COMM_PREFIX, item.msg, "WHISPER", item.target)
+	if THROTTLED and result == THROTTLED then return end -- try again next tick
+	table.remove(sendQueue, 1)
+	if SUCCESS and result ~= SUCCESS then
+		-- Drop the rest of this transfer; it can't arrive complete.
+		for i = #sendQueue, 1, -1 do
+			if sendQueue[i].target == item.target then table.remove(sendQueue, i) end
+		end
+		Print("Couldn't send to " .. item.target .. " (error " .. tostring(result) .. "). Try again out of combat/instances.")
+	end
+end
+
+local function Enqueue(msg, target)
+	sendQueue[#sendQueue + 1] = { msg = TruncateUTF8(msg, MAX_MSG), target = target }
+	if not sendTicker then
+		sendTicker = C_Timer.NewTicker(0.2, ProcessSendQueue)
+	end
+end
+
+local function OwnAvoidEntries()
+	local list = {}
+	for _, entry in pairs(db.players) do
+		if entry.face == FACE_AVOID then list[#list + 1] = entry end
+	end
+	return list
+end
+
+function SMA:Share(target)
+	target = type(target) == "string" and strtrim(target) or ""
+	if target == "" then
+		StaticPopup_Show("SNOGMARRYAVOID_SHARE")
+		return
+	end
+	if IsMe(target) then
+		Print("You can't share with yourself.")
+		return
+	end
+	local count = #OwnAvoidEntries()
+	if count == 0 then
+		Print("You have no " .. FaceText(FACE_AVOID) .. " entries to share.")
+		return
+	end
+	outgoingOffers[Key(target)] = GetTime() + OFFER_TTL
+	Enqueue("OFFER\t" .. count, target)
+	Print("Offered " .. count .. " " .. FaceText(FACE_AVOID) .. " entries to " .. target .. ". Waiting for them to accept.")
+end
+
+local function SendEntries(target)
+	local list = OwnAvoidEntries()
+	for _, entry in ipairs(list) do
+		local note = (entry.note or ""):gsub("[\t\n]", " ")
+		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or "") .. "\t" .. note, target)
+	end
+	Enqueue("END", target)
+	Print("Sending " .. #list .. " entries to " .. target .. ".")
+end
+
+local function OnAddonMessage(prefix, text, channel, sender)
+	if prefix ~= COMM_PREFIX or channel ~= "WHISPER" then return end
+	if not (Accessible(text) and Accessible(sender)) or IsMe(sender) then return end
+	local senderKey = Key(sender)
+	if not senderKey then return end
+	local cmd, rest = strsplit("\t", text, 2)
+	local now = GetTime()
+
+	if cmd == "OFFER" then
+		local count = tonumber(rest) or 0
+		StaticPopup_Show("SNOGMARRYAVOID_OFFER", Escape(DisplayName(sender)), count, sender)
+	elseif cmd == "ACCEPT" then
+		local expires = outgoingOffers[senderKey]
+		if not expires or expires < now then return end
+		outgoingOffers[senderKey] = nil
+		SendEntries(sender)
+	elseif cmd == "DECLINE" then
+		if outgoingOffers[senderKey] then
+			outgoingOffers[senderKey] = nil
+			Print(sender .. " declined your list.")
+		end
+	elseif cmd == "E" then
+		local transfer = incoming[senderKey]
+		if not transfer or transfer.expires < now or not rest then return end
+		local name, role, note = strsplit("\t", rest, 3)
+		local key = Key(name)
+		if not key or IsMe(name) then return end
+		db.shared[key] = {
+			name = DisplayName(name),
+			role = ROLE_BY_KEY[role or ""] and role or nil,
+			note = note or "",
+			from = DisplayName(sender),
+			received = time(),
+		}
+		transfer.count = transfer.count + 1
+		transfer.expires = now + OFFER_TTL
+	elseif cmd == "END" then
+		local transfer = incoming[senderKey]
+		if not transfer then return end
+		incoming[senderKey] = nil
+		Print("Received " .. transfer.count .. " " .. FaceText(FACE_AVOID) .. " entries from " .. Escape(DisplayName(sender)) .. ".")
+		SMA:Refresh()
+	end
+end
+
+StaticPopupDialogs["SNOGMARRYAVOID_OFFER"] = {
+	text = "SnogMarryAvoid: %s wants to share %d avoid-list entries with you.",
+	button1 = ACCEPT or "Accept",
+	button2 = DECLINE or "Decline",
+	OnAccept = function(_, sender)
+		incoming[Key(sender)] = { expires = GetTime() + OFFER_TTL, count = 0 }
+		Enqueue("ACCEPT", sender)
+	end,
+	OnCancel = function(_, sender, reason)
+		if reason == "clicked" then Enqueue("DECLINE", sender) end
+	end,
+	timeout = 60,
+	whileDead = 1,
+	hideOnEscape = 1,
+}
+
+StaticPopupDialogs["SNOGMARRYAVOID_SHARE"] = {
+	text = "Share your " .. FaceText(FACE_AVOID) .. " list with which player?",
+	button1 = "Share",
+	button2 = CANCEL or "Cancel",
+	hasEditBox = 1,
+	OnAccept = function(dialog)
+		SMA:Share(dialog:GetEditBox():GetText())
+	end,
+	EditBoxOnEnterPressed = function(editBox)
+		local dialog = editBox:GetParent()
+		SMA:Share(dialog:GetEditBox():GetText())
+		dialog:Hide()
+	end,
+	EditBoxOnEscapePressed = function(editBox) editBox:GetParent():Hide() end,
+	timeout = 0,
+	whileDead = 1,
+	hideOnEscape = 1,
+}
 
 ----------------------------------------------------------------------------------------------------
 -- Minimap button & addon compartment
@@ -578,6 +810,8 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db = SnogMarryAvoidDB
 		db.players = db.players or {}
 		db.minimap = db.minimap or {}
+		db.shared = db.shared or {}
+		C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
 		AddMenuEntries()
 		CreateMinimapButton()
 		WrapInvite("InviteUnit")
@@ -585,8 +819,11 @@ events:SetScript("OnEvent", function(self, event, ...)
 		self:UnregisterEvent("ADDON_LOADED")
 	elseif event == "PARTY_INVITE_REQUEST" then
 		if db then OnPartyInviteRequest(...) end
+	elseif event == "CHAT_MSG_ADDON" then
+		if db then OnAddonMessage(...) end
 	end
 end)
+events:RegisterEvent("CHAT_MSG_ADDON")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"
@@ -598,6 +835,10 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		db.minimap.hide = not db.minimap.hide
 		minimapButton:SetShown(not db.minimap.hide)
 		Print("Minimap button " .. (db.minimap.hide and "hidden" or "shown") .. ".")
+	elseif msg == "share" or msg:find("^share ") then
+		local target = strtrim(msg:sub(6))
+		if target == "" then target = NameFromUnit("target") or "" end
+		SMA:Share(target)
 	elseif msg == "target" then
 		local name = NameFromUnit("target")
 		if name and not IsMe(name) then
