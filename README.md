@@ -9,6 +9,7 @@ A WoW Forever (Interface 16001) addon for keeping an account-wide list of player
 ## Use
 
 - Right-click a player (unit frame, target, party/raid, chat name, friends, guild, recent allies) and choose **SnogMarryAvoid**. The window opens with that player filled in. If they're already tagged, the menu entry shows their face.
+- The minimap button (drag it around the minimap edge) and the addon compartment entry both open the window. `/sma minimap` hides or shows the button.
 - `/sma` toggles the window. `/sma target` opens your target. `/sma <name>` opens or adds a player by name.
 - Click a row in the list to edit it. Save, Delete, or New to start a blank entry. Enter in either text box saves.
 

@@ -497,6 +497,74 @@ local function OnPartyInviteRequest(name, ...)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Minimap button & addon compartment
+----------------------------------------------------------------------------------------------------
+
+local ICON = "Interface\\Icons\\INV_Misc_Note_01"
+local minimapButton
+
+local function PositionMinimapButton()
+	local angle = math.rad(db.minimap.angle or 200)
+	local radius = Minimap:GetWidth() / 2 + 10
+	minimapButton:ClearAllPoints()
+	minimapButton:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+end
+
+local function MinimapButtonDragUpdate()
+	local mx, my = Minimap:GetCenter()
+	local scale = Minimap:GetEffectiveScale()
+	local cx, cy = GetCursorPosition()
+	db.minimap.angle = math.deg(math.atan2(cy / scale - my, cx / scale - mx))
+	PositionMinimapButton()
+end
+
+local function CreateMinimapButton()
+	local b = CreateFrame("Button", "SnogMarryAvoidMinimapButton", Minimap)
+	minimapButton = b
+	b:SetSize(31, 31)
+	b:SetFrameStrata("MEDIUM")
+	b:SetFrameLevel(8)
+	b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	b:RegisterForDrag("LeftButton")
+	b:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+	local bg = b:CreateTexture(nil, "BACKGROUND")
+	bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+	bg:SetSize(20, 20)
+	bg:SetPoint("TOPLEFT", 7, -5)
+
+	local icon = b:CreateTexture(nil, "ARTWORK")
+	icon:SetTexture(ICON)
+	icon:SetSize(17, 17)
+	icon:SetPoint("TOPLEFT", 7, -6)
+	icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+	local border = b:CreateTexture(nil, "OVERLAY")
+	border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+	border:SetSize(53, 53)
+	border:SetPoint("TOPLEFT")
+
+	b:SetScript("OnClick", function() SMA:Toggle() end)
+	b:SetScript("OnDragStart", function(self) self:SetScript("OnUpdate", MinimapButtonDragUpdate) end)
+	b:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
+	b:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+		GameTooltip:SetText("SnogMarryAvoid")
+		GameTooltip:AddLine("Click to open. Drag to move.", 1, 1, 1)
+		GameTooltip:AddLine("/sma minimap to hide this button.", 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+	end)
+	b:SetScript("OnLeave", GameTooltip_Hide)
+
+	PositionMinimapButton()
+	b:SetShown(not db.minimap.hide)
+end
+
+function SnogMarryAvoid_OnAddonCompartmentClick()
+	SMA:Toggle()
+end
+
+----------------------------------------------------------------------------------------------------
 -- Events & slash command
 ----------------------------------------------------------------------------------------------------
 
@@ -509,7 +577,9 @@ events:SetScript("OnEvent", function(self, event, ...)
 		SnogMarryAvoidDB = SnogMarryAvoidDB or {}
 		db = SnogMarryAvoidDB
 		db.players = db.players or {}
+		db.minimap = db.minimap or {}
 		AddMenuEntries()
+		CreateMinimapButton()
 		WrapInvite("InviteUnit")
 		WrapInvite("ConfirmInviteUnit")
 		self:UnregisterEvent("ADDON_LOADED")
@@ -524,6 +594,10 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 	msg = strtrim(msg or "")
 	if msg == "" then
 		SMA:Toggle()
+	elseif msg == "minimap" then
+		db.minimap.hide = not db.minimap.hide
+		minimapButton:SetShown(not db.minimap.hide)
+		Print("Minimap button " .. (db.minimap.hide and "hidden" or "shown") .. ".")
 	elseif msg == "target" then
 		local name = NameFromUnit("target")
 		if name and not IsMe(name) then

@@ -4,5 +4,7 @@
 ## Author: icouldonlygetthisname
 ## Version: 1.0.0
 ## SavedVariables: SnogMarryAvoidDB
+## IconTexture: Interface\Icons\INV_Misc_Note_01
+## AddonCompartmentFunc: SnogMarryAvoid_OnAddonCompartmentClick
 
 SnogMarryAvoid.lua
