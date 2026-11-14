@@ -613,7 +613,25 @@ function SMA:GetFrame()
 	f.guildCheck:SetScript("OnLeave", GameTooltip_Hide)
 	local guildLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	guildLabel:SetPoint("LEFT", f.guildCheck, "RIGHT", 2, 0)
-	guildLabel:SetText("Share with guild (both sides must tick this)")
+	guildLabel:SetText("Share with guild (mutual)")
+
+	-- Addon-side ignore for :( players
+	f.ignoreCheck = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+	f.ignoreCheck:SetSize(24, 24)
+	f.ignoreCheck:SetPoint("TOPLEFT", 260, -182)
+	f.ignoreCheck:SetChecked(db.ignore)
+	f.ignoreCheck:SetScript("OnClick", function(self) SMA:SetIgnore(self:GetChecked()) end)
+	f.ignoreCheck:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Ignore :( players")
+		GameTooltip:AddLine("Hides their chat (say, yell, emotes, whispers, channels, group and guild chat) and declines their duel and trade requests. Their group invites are always declined.", 1, 1, 1, true)
+		GameTooltip:AddLine("Separate from the game's ignore list, so there's no limit. Battle.net friends are never ignored.", 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	f.ignoreCheck:SetScript("OnLeave", GameTooltip_Hide)
+	local ignoreLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	ignoreLabel:SetPoint("LEFT", f.ignoreCheck, "RIGHT", 2, 0)
+	ignoreLabel:SetText("Ignore " .. FaceText(FACE_AVOID, 12) .. " (chat, duels, trades)")
 
 	-- List
 	f.selectAll = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
@@ -783,6 +801,71 @@ local function OnPartyInviteRequest(name, ...)
 	HideInvitePopups()
 	C_Timer.After(0, HideInvitePopups) -- in case Blizzard's handler runs after ours
 	Print(FaceText(FACE_AVOID) .. " Declined a group invite from " .. (DisplayName(name) or "an avoided player") .. ".")
+end
+
+----------------------------------------------------------------------------------------------------
+-- Ignore (addon-side, no limit; separate from the game's ignore list)
+----------------------------------------------------------------------------------------------------
+
+-- True if this player is on the :( list, ignoring is on, and they aren't a Battle.net friend.
+local function ShouldIgnore(name, guid)
+	if not (db and db.ignore) then return false end
+	if not Accessible(name) or not name or name == "" then return false end
+	if not Accessible(guid) then guid = nil end
+	if not SMA:IsAvoided(name, guid) then return false end
+	return not SMA:IsBNetFriend(name, guid)
+end
+
+-- Every chat frame runs the filter for every message, so remember the last answer.
+local lastAuthor, lastGUID, lastTime, lastResult
+
+local function ChatFilter(_, _, _, author, ...)
+	local guid = select(10, ...) -- arg12 of CHAT_MSG_* (... starts at arg3)
+	if not Accessible(author) or not author then return false end
+	if not Accessible(guid) then guid = nil end
+	local now = GetTime()
+	if author ~= lastAuthor or guid ~= lastGUID or now ~= lastTime then
+		lastAuthor, lastGUID, lastTime = author, guid, now
+		lastResult = ShouldIgnore(author, guid)
+	end
+	return lastResult
+end
+
+local CHAT_EVENTS = {
+	"CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_EMOTE", "CHAT_MSG_TEXT_EMOTE",
+	"CHAT_MSG_WHISPER", "CHAT_MSG_CHANNEL",
+	"CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER", "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER",
+	"CHAT_MSG_RAID_WARNING", "CHAT_MSG_INSTANCE_CHAT", "CHAT_MSG_INSTANCE_CHAT_LEADER",
+	"CHAT_MSG_GUILD", "CHAT_MSG_OFFICER",
+}
+
+local function AddChatFilters()
+	local add = (ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter) or ChatFrame_AddMessageEventFilter
+	if not add then return end
+	for _, event in ipairs(CHAT_EVENTS) do add(event, ChatFilter) end
+end
+
+local function OnDuelRequested(name)
+	if not ShouldIgnore(name) then return end
+	CancelDuel()
+	StaticPopup_Hide("DUEL_REQUESTED")
+	C_Timer.After(0, function() StaticPopup_Hide("DUEL_REQUESTED") end)
+	Print(FaceText(FACE_AVOID) .. " Declined a duel from " .. Escape(DisplayName(name)) .. ".")
+end
+
+local function OnTradeRequest(name)
+	if not ShouldIgnore(name) then return end
+	CancelTrade()
+	StaticPopup_Hide("TRADE")
+	C_Timer.After(0, function() StaticPopup_Hide("TRADE") end)
+	Print(FaceText(FACE_AVOID) .. " Declined a trade from " .. Escape(DisplayName(name)) .. ".")
+end
+
+function SMA:SetIgnore(on)
+	db.ignore = on and true or false
+	lastAuthor = nil
+	if frame then frame.ignoreCheck:SetChecked(db.ignore) end
+	Print("Ignoring " .. FaceText(FACE_AVOID) .. " players " .. (db.ignore and "on" or "off") .. ".")
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1150,6 +1233,7 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db.minimap = db.minimap or {}
 		db.inbox = db.inbox or {}
 		db.dismissed = db.dismissed or {}
+		if db.ignore == nil then db.ignore = true end
 		if db.shared then -- 1.0 dev builds kept one flat table of shared entries
 			for key, s in pairs(db.shared) do
 				local senderKey = Key(s.from) or "?"
@@ -1167,9 +1251,14 @@ events:SetScript("OnEvent", function(self, event, ...)
 		CreateMinimapButton()
 		WrapInvite("InviteUnit")
 		WrapInvite("ConfirmInviteUnit")
+		AddChatFilters()
 		self:UnregisterEvent("ADDON_LOADED")
 	elseif event == "PARTY_INVITE_REQUEST" then
 		if db then OnPartyInviteRequest(...) end
+	elseif event == "DUEL_REQUESTED" then
+		if db then OnDuelRequested(...) end
+	elseif event == "TRADE_REQUEST" then
+		if db then OnTradeRequest(...) end
 	elseif event == "CHAT_MSG_ADDON" then
 		if db then OnAddonMessage(...) end
 	elseif event == "PLAYER_ENTERING_WORLD" then
@@ -1181,6 +1270,8 @@ events:SetScript("OnEvent", function(self, event, ...)
 end)
 events:RegisterEvent("CHAT_MSG_ADDON")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
+events:RegisterEvent("DUEL_REQUESTED")
+events:RegisterEvent("TRADE_REQUEST")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"
@@ -1194,6 +1285,8 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		Print("Minimap button " .. (db.minimap.hide and "hidden" or "shown") .. ".")
 	elseif msg == "guild" then
 		SMA:SetGuildShare(not db.guildShare)
+	elseif msg == "ignore" then
+		SMA:SetIgnore(not db.ignore)
 	elseif msg == "share" or msg:find("^share ") then
 		local target = strtrim(msg:sub(6))
 		if target == "" then target = NameFromUnit("target") or "" end

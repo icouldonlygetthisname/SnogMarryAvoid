@@ -27,7 +27,9 @@ To share lists, both players need the addon (see [Sharing](#sharing--lists)).
 - **Outgoing:** `C_PartyInfo.InviteUnit` and `C_PartyInfo.ConfirmInviteUnit` are wrapped, so inviting a :( player from any menu, `/invite`, or the friends list is blocked with a chat message.
 - **Incoming:** their group invites (`PARTY_INVITE_REQUEST`) are declined automatically and the invite popup is hidden. The inviter is matched by name and by GUID (the GUID is stored when you tag someone from a unit).
 
-**Caveat: Battle.net friends can't be blocked.** If a :( player is on your Battle.net friends list, invites in both directions go through as normal, and the window shows a red warning next to the faces. A friend is recognised by GUID, or by character name while they're online. An offline Battle.net friend tagged only by name can't be matched, but they also can't invite you while offline.
+- **Ignore (on by default):** their chat is hidden (say, yell, emotes, whispers, channels, party, raid, instance, guild and officer chat), and their duel and trade requests are declined. This is done by the addon, not the game's ignore list, so there's no limit on how many players you can ignore. It only affects you; the other player isn't told. Turn it off with the **Ignore :(** checkbox or `/sma ignore` (invites stay blocked either way).
+
+**Caveat: Battle.net friends can't be blocked or ignored.** If a :( player is on your Battle.net friends list, invites in both directions go through as normal, and the window shows a red warning next to the faces. A friend is recognised by GUID, or by character name while they're online. An offline Battle.net friend tagged only by name can't be matched, but they also can't invite you while offline.
 
 ## Sharing :( lists
 
@@ -68,7 +70,7 @@ Forever uses regional unique names ("First Surname", no realm). Blizzard sometim
 
 - `inbox[senderKey] = { from, via = "direct"|"guild", updated, entries = { [playerKey] = { name, role } } }`: lists received from others (no notes).
 - `dismissed[playerKey] = true`: received entries you deleted.
-- `guildShare`: guild opt-in. `minimap = { angle, hide }`.
+- `guildShare`: guild opt-in. `ignore`: hide chat and decline duels/trades from :( players (default on). `minimap = { angle, hide }`.
 
 ## Face icons
 
