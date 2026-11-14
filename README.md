@@ -16,7 +16,7 @@ To share lists, both players need the addon (see [Sharing](#sharing--lists)).
 
 ## Use
 
-- Right-click a player (unit frame, target, party/raid, chat name, friends, guild, recent allies) and choose **SnogMarryAvoid**. The window opens with that player filled in. If they're already tagged, the menu entry shows their face.
+- Right-click a player (unit frame, target, party/raid, chat name, friends, guild, recent allies) and hover **SnogMarryAvoid**. Pick a face to add or re-tag them in one click (an existing note and role are kept; a new party member gets the role they queued as). **Add with note and role...** opens the window with that player filled in. If they're already tagged, the menu entry shows their face.
 - The minimap button (drag it around the minimap edge) and the addon compartment entry both open the window. `/sma minimap` hides or shows the button.
 - `/sma` toggles the window. `/sma target` opens your target. `/sma <name>` opens or adds a player by name.
 - **Edit:** click a row, or its **Edit** button, to load it into the editor at the top (the row is highlighted). Change the face, role or note and press **Save**. For a new player, **New** clears the editor and the button reads **Add**. Enter in either text box saves.

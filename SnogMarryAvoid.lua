@@ -304,6 +304,35 @@ function SMA:Save()
 	self:OnOwnListChanged()
 end
 
+-- Tag a player from the right-click menu without opening the window. Keeps an existing role and
+-- note. A new entry from a group member takes the role they queued as, if any.
+function SMA:QuickTag(name, guid, unit, face)
+	local display = DisplayName(name)
+	local key = display and Key(display)
+	if not key then return end
+	local old = db.players[key]
+	local role = old and old.role
+	if not old and unit and UnitGroupRolesAssigned then
+		local r = UnitGroupRolesAssigned(unit)
+		if Accessible(r) and ROLE_BY_KEY[r] then role = r end
+	end
+	db.dismissed[key] = nil
+	db.players[key] = {
+		name = old and old.name or display,
+		face = face,
+		role = role,
+		note = old and old.note or "",
+		guid = (Accessible(guid) and guid) or (old and old.guid) or nil,
+		updated = time(),
+	}
+	Print(FaceText(face) .. " " .. Escape(display) .. (old and " updated." or " added."))
+	if frame and frame:IsShown() then
+		if frame.editKey == key then self:Load(display) end
+		self:Refresh()
+	end
+	self:OnOwnListChanged()
+end
+
 function SMA:Delete()
 	if frame.editKey then
 		db.players[frame.editKey] = nil
@@ -680,13 +709,30 @@ local function AddMenuEntries()
 		Menu.ModifyMenu("MENU_UNIT_" .. which, function(_, rootDescription, contextData)
 			local name, guid = NameFromContext(contextData)
 			if not name then return end
+			local unit = contextData and contextData.unit
 			local entry = SMA:Get(name)
 			local face = entry and entry.face or (SMA:GetShared(name) and FACE_AVOID)
 			local text = "SnogMarryAvoid"
 			if face then text = FaceText(face) .. " " .. text end
 			rootDescription:CreateDivider()
-			rootDescription:CreateButton(text, function() SMA:Open(name, guid) end)
-			rootDescription:CreateButton("Swap " .. FaceText(FACE_AVOID) .. " lists", function() SMA:Share(name) end)
+			-- Submenu: tag in one click, or open the window for the role and note.
+			local sub = rootDescription:CreateButton(text)
+			local function IsSelected(f)
+				local e = SMA:Get(name)
+				return e ~= nil and e.face == f
+			end
+			local function SetSelected(f)
+				SMA:QuickTag(name, guid, unit, f)
+				return MenuResponse and MenuResponse.Close
+			end
+			for i, f in ipairs(FACES) do
+				sub:CreateRadio(FaceText(i) .. " " .. f.label, IsSelected, SetSelected, i)
+			end
+			sub:CreateDivider()
+			sub:CreateButton(entry and "Edit note and role..." or "Add with note and role...", function()
+				SMA:Open(name, guid)
+			end)
+			sub:CreateButton("Swap " .. FaceText(FACE_AVOID) .. " lists", function() SMA:Share(name) end)
 		end)
 	end
 end
