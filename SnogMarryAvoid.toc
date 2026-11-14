@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: SnogMarryAvoid
+## Notes: Tag players with a face, role and note. Blocks invites to and from :( players.
+## Author: icouldonlygetthisname
+## Version: 1.0.0
+## SavedVariables: SnogMarryAvoidDB
+
+SnogMarryAvoid.lua
