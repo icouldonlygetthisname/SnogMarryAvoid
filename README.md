@@ -6,6 +6,14 @@ A WoW Forever (Interface 16001) addon for keeping an account-wide list of player
 - a role: tank, healer, DPS or none
 - a note
 
+## Install
+
+1. Download `SnogMarryAvoid-<version>.zip` from [Releases](https://github.com/icouldonlygetthisname/SnogMarryAvoid/releases).
+2. Extract it into `World of Warcraft\_forever_\Interface\AddOns\`, so you end up with `AddOns\SnogMarryAvoid\SnogMarryAvoid.toc`.
+3. Restart the game. A new addon folder isn't picked up by `/reload`.
+
+To share lists, both players need the addon (see [Sharing](#sharing--lists)).
+
 ## Use
 
 - Right-click a player (unit frame, target, party/raid, chat name, friends, guild, recent allies) and choose **SnogMarryAvoid**. The window opens with that player filled in. If they're already tagged, the menu entry shows their face.
