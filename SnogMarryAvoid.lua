@@ -128,10 +128,22 @@ function SMA:GetByGUID(guid)
 	end
 end
 
--- Avoid entries received from friends. Kept apart from your own and never override them.
+-- Avoid entries received from other players, kept per sender in db.inbox[senderKey] =
+-- { from, via = "guild"|"direct", updated, entries = { [playerKey] = { name, role, note } } }.
+-- They never override your own entries, and ones you delete (db.dismissed) stay hidden.
+-- Returns the first matching entry, its key, a "from" label, and how many senders have it.
 function SMA:GetShared(name)
 	local key = Key(name)
-	return key and db.shared[key], key
+	if not key or db.dismissed[key] then return nil, key end
+	local found, from, count = nil, nil, 0
+	for _, box in pairs(db.inbox) do
+		local e = box.entries[key]
+		if e then
+			count = count + 1
+			if not found then found, from = e, box.from end
+		end
+	end
+	return found, key, from, count
 end
 
 -- Your own entry decides if you have one; otherwise a friend's shared :( entry counts.
@@ -225,7 +237,8 @@ function SMA:Load(name, guid)
 	local f = self:GetFrame()
 	local entry, key, shared = nil, nil, nil
 	if name then entry, key = self:Get(name) end
-	if name and not entry then shared = self:GetShared(name) end
+	local _, from, fromCount
+	if name and not entry then shared, _, from, fromCount = self:GetShared(name) end
 	f.editKey = entry and key or nil
 	f.sharedKey = shared and key or nil
 	f.guid = guid or (entry and entry.guid) or nil
@@ -236,7 +249,8 @@ function SMA:Load(name, guid)
 	self:SetRole(source and source.role or nil)
 	f.deleteButton:SetEnabled(source ~= nil)
 	if shared then
-		f.sourceText:SetText("Shared by " .. Escape(shared.from) .. ". Save to make it yours.")
+		local by = Escape(from) .. ((fromCount or 0) > 1 and (" +" .. (fromCount - 1)) or "")
+		f.sourceText:SetText("Shared by " .. by .. ". Save to make it yours.")
 	else
 		f.sourceText:SetText("")
 	end
@@ -256,7 +270,7 @@ function SMA:Save()
 	if f.editKey and f.editKey ~= key then
 		db.players[f.editKey] = nil
 	end
-	db.shared[key] = nil -- adopted: your own entry replaces the shared one
+	db.dismissed[key] = nil
 	db.players[key] = {
 		name = name,
 		face = f.face or 1,
@@ -267,13 +281,15 @@ function SMA:Save()
 	}
 	self:Load(name)
 	self:Refresh()
+	self:OnOwnListChanged()
 end
 
 function SMA:Delete()
 	if frame.editKey then
 		db.players[frame.editKey] = nil
+		self:OnOwnListChanged()
 	elseif frame.sharedKey then
-		db.shared[frame.sharedKey] = nil
+		db.dismissed[frame.sharedKey] = true -- stays hidden even when the sender syncs again
 	end
 	self:Load(nil)
 	self:Refresh()
@@ -285,9 +301,17 @@ function SMA:Refresh()
 	for _, entry in pairs(db.players) do
 		list[#list + 1] = entry
 	end
-	for key, shared in pairs(db.shared) do
-		if not db.players[key] then
-			list[#list + 1] = { name = shared.name, face = FACE_AVOID, role = shared.role, note = shared.note, from = shared.from }
+	local seen = {}
+	for _, box in pairs(db.inbox) do
+		for key in pairs(box.entries) do
+			if not seen[key] and not db.players[key] then
+				seen[key] = true
+				local shared, _, from, count = SMA:GetShared(key)
+				if shared then
+					if count > 1 then from = from .. " +" .. (count - 1) end
+					list[#list + 1] = { name = shared.name, face = FACE_AVOID, role = shared.role, note = shared.note, from = from }
+				end
+			end
 		end
 	end
 	table.sort(list, function(a, b)
@@ -342,7 +366,7 @@ function SMA:GetFrame()
 
 	local f = CreateFrame("Frame", "SnogMarryAvoidFrame", UIParent, "BasicFrameTemplateWithInset")
 	frame = f
-	f:SetSize(460, 500)
+	f:SetSize(460, 520)
 	f:SetPoint("CENTER")
 	f:SetFrameStrata("DIALOG")
 	f:SetMovable(true)
@@ -434,22 +458,40 @@ function SMA:GetFrame()
 	share:SetScript("OnClick", function() StaticPopup_Show("SNOGMARRYAVOID_SHARE") end)
 	share:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:SetText("Share your :( list")
-		GameTooltip:AddLine("Sends your own avoid entries to another player with SnogMarryAvoid. They have to accept first.", 1, 1, 1, true)
+		GameTooltip:SetText("Swap :( lists")
+		GameTooltip:AddLine("Offers a two-way swap of your own avoid entries with another player who has SnogMarryAvoid. Nothing is sent until they accept.", 1, 1, 1, true)
 		GameTooltip:Show()
 	end)
 	share:SetScript("OnLeave", GameTooltip_Hide)
 
+	-- Guild sharing opt-in
+	f.guildCheck = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+	f.guildCheck:SetSize(24, 24)
+	f.guildCheck:SetPoint("TOPLEFT", 66, -182)
+	f.guildCheck:SetChecked(db.guildShare)
+	f.guildCheck:SetScript("OnClick", function(self) SMA:SetGuildShare(self:GetChecked()) end)
+	f.guildCheck:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Share with guild")
+		GameTooltip:AddLine("Swaps :( lists with guild mates who have also ticked this. Nothing goes to anyone who hasn't.", 1, 1, 1, true)
+		GameTooltip:AddLine("Unticking takes your list back from them and drops the guild lists you received.", 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	f.guildCheck:SetScript("OnLeave", GameTooltip_Hide)
+	local guildLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	guildLabel:SetPoint("LEFT", f.guildCheck, "RIGHT", 2, 0)
+	guildLabel:SetText("Share with guild (both sides must tick this)")
+
 	-- List
 	f.countText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	f.countText:SetPoint("TOPLEFT", 16, -192)
+	f.countText:SetPoint("TOPLEFT", 16, -214)
 
 	f.sourceText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	f.sourceText:SetPoint("TOPRIGHT", -16, -192)
+	f.sourceText:SetPoint("TOPRIGHT", -16, -214)
 	f.sourceText:SetJustifyH("RIGHT")
 
 	f.scrollBox = CreateFrame("Frame", nil, f, "WowScrollBoxList")
-	f.scrollBox:SetPoint("TOPLEFT", 12, -208)
+	f.scrollBox:SetPoint("TOPLEFT", 12, -230)
 	f.scrollBox:SetPoint("BOTTOMRIGHT", -30, 12)
 
 	local scrollBar = CreateFrame("EventFrame", nil, f, "MinimalScrollBar")
@@ -495,7 +537,7 @@ local function AddMenuEntries()
 			if face then text = FaceText(face) .. " " .. text end
 			rootDescription:CreateDivider()
 			rootDescription:CreateButton(text, function() SMA:Open(name, guid) end)
-			rootDescription:CreateButton("Share my " .. FaceText(FACE_AVOID) .. " list", function() SMA:Share(name) end)
+			rootDescription:CreateButton("Swap " .. FaceText(FACE_AVOID) .. " lists", function() SMA:Share(name) end)
 		end)
 	end
 end
@@ -549,23 +591,32 @@ local function OnPartyInviteRequest(name, ...)
 end
 
 ----------------------------------------------------------------------------------------------------
--- Sharing (manual push, receiver must accept)
+-- Sharing (always mutual: both sides agree, both sides send)
 ----------------------------------------------------------------------------------------------------
--- Protocol, all WHISPER addon messages on COMM_PREFIX, fields separated by tabs:
---   OFFER <count>                 sender -> receiver, receiver gets an accept popup
---   ACCEPT / DECLINE              receiver -> sender
---   E <name> <role> <note>        one avoid entry (sender -> receiver, only after ACCEPT)
---   END                           sender -> receiver
--- Only your own :( entries are sent; entries received from friends are never passed on.
+-- Direct swap (WHISPER):
+--   OFFER <count>          A -> B. B gets a popup; nothing has been sent yet.
+--   ACCEPT / DECLINE       B -> A. On accept, both sides send their lists.
+-- Guild (control on GUILD, data on WHISPER). Only between players who ticked "Share with guild":
+--   HELLO                  "I've opted in" (on login / when ticked)
+--   HI <name>              reply from an opted-in player to <name>'s HELLO; <name> then sends theirs
+--   BYE                    "I've opted out": drop my list
+-- A message on the GUILD channel proves the sender is in your guild, so data is only accepted
+-- from guild senders seen on that channel this session.
+-- List transfer (WHISPER): BEGIN <direct|guild>, E <name> <role> <note> per entry, END.
+-- A transfer replaces that sender's previous list, so their deletions carry over.
+-- Only your own :( entries are sent; entries you received are never passed on.
 
 local COMM_PREFIX = "SnogMarryAvoid"
 local MAX_MSG = 255
 local OFFER_TTL = 120
+local MAX_ENTRIES = 1000
 
 local outgoingOffers = {} -- [receiverKey] = expiry time
-local incoming = {}       -- [senderKey] = { expires, count }
+local directAccepted = {} -- [senderKey] = expiry time: we agreed to a swap with them
+local guildPeers = {}     -- [senderKey] = true: opted-in guild mates seen on the GUILD channel
+local transfers = {}      -- [senderKey] = { via, entries, count, expires }
 local sendQueue = {}
-local sendTicker
+local sendTicker, syncTimer
 
 local THROTTLED = Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.AddonMessageThrottle
 local SUCCESS = Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success
@@ -591,20 +642,27 @@ local function ProcessSendQueue()
 		sendTicker = nil
 		return
 	end
-	local result = C_ChatInfo.SendAddonMessage(COMM_PREFIX, item.msg, "WHISPER", item.target)
+	local result = C_ChatInfo.SendAddonMessage(COMM_PREFIX, item.msg, item.chatType, item.target)
 	if THROTTLED and result == THROTTLED then return end -- try again next tick
 	table.remove(sendQueue, 1)
-	if SUCCESS and result ~= SUCCESS then
+	if SUCCESS and result ~= SUCCESS and item.target then
 		-- Drop the rest of this transfer; it can't arrive complete.
 		for i = #sendQueue, 1, -1 do
 			if sendQueue[i].target == item.target then table.remove(sendQueue, i) end
 		end
-		Print("Couldn't send to " .. item.target .. " (error " .. tostring(result) .. "). Try again out of combat/instances.")
+		if not item.quiet then
+			Print("Couldn't send to " .. item.target .. " (error " .. tostring(result) .. "). Try again out of combat/instances.")
+		end
 	end
 end
 
-local function Enqueue(msg, target)
-	sendQueue[#sendQueue + 1] = { msg = TruncateUTF8(msg, MAX_MSG), target = target }
+local function Enqueue(msg, target, quiet)
+	sendQueue[#sendQueue + 1] = {
+		msg = TruncateUTF8(msg, MAX_MSG),
+		chatType = target and "WHISPER" or "GUILD",
+		target = target,
+		quiet = quiet,
+	}
 	if not sendTicker then
 		sendTicker = C_Timer.NewTicker(0.2, ProcessSendQueue)
 	end
@@ -618,6 +676,20 @@ local function OwnAvoidEntries()
 	return list
 end
 
+local function SendList(target, via)
+	local list = OwnAvoidEntries()
+	local quiet = via == "guild"
+	Enqueue("BEGIN\t" .. via, target, quiet)
+	for _, entry in ipairs(list) do
+		local note = (entry.note or ""):gsub("[\t\n]", " ")
+		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or "") .. "\t" .. note, target, quiet)
+	end
+	Enqueue("END", target, quiet)
+	return #list
+end
+
+-- Direct swap ------------------------------------------------------------------------------------
+
 function SMA:Share(target)
 	target = type(target) == "string" and strtrim(target) or ""
 	if target == "" then
@@ -625,81 +697,154 @@ function SMA:Share(target)
 		return
 	end
 	if IsMe(target) then
-		Print("You can't share with yourself.")
-		return
-	end
-	local count = #OwnAvoidEntries()
-	if count == 0 then
-		Print("You have no " .. FaceText(FACE_AVOID) .. " entries to share.")
+		Print("You can't swap with yourself.")
 		return
 	end
 	outgoingOffers[Key(target)] = GetTime() + OFFER_TTL
-	Enqueue("OFFER\t" .. count, target)
-	Print("Offered " .. count .. " " .. FaceText(FACE_AVOID) .. " entries to " .. target .. ". Waiting for them to accept.")
+	Enqueue("OFFER\t" .. #OwnAvoidEntries(), target)
+	Print("Offered to swap " .. FaceText(FACE_AVOID) .. " lists with " .. target .. ". Waiting for them to accept.")
 end
 
-local function SendEntries(target)
-	local list = OwnAvoidEntries()
-	for _, entry in ipairs(list) do
-		local note = (entry.note or ""):gsub("[\t\n]", " ")
-		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or "") .. "\t" .. note, target)
+-- Guild ------------------------------------------------------------------------------------------
+
+local function DropGuildInbox(senderKey)
+	for key, box in pairs(db.inbox) do
+		if box.via == "guild" and (not senderKey or key == senderKey) then
+			db.inbox[key] = nil
+		end
 	end
-	Enqueue("END", target)
-	Print("Sending " .. #list .. " entries to " .. target .. ".")
 end
+
+function SMA:GuildHello()
+	if db.guildShare and IsInGuild() then
+		Enqueue("HELLO", nil, true)
+	end
+end
+
+function SMA:SetGuildShare(on)
+	on = not not on
+	if on == not not db.guildShare then return end
+	db.guildShare = on
+	if on then
+		if not IsInGuild() then
+			Print("Guild sharing is on, but you're not in a guild.")
+		else
+			Print("Guild sharing on. Swapping " .. FaceText(FACE_AVOID) .. " lists with guild mates who have it on too.")
+		end
+		self:GuildHello()
+	else
+		if IsInGuild() then Enqueue("BYE", nil, true) end
+		wipe(guildPeers)
+		DropGuildInbox()
+		Print("Guild sharing off. Your list was withdrawn and guild lists removed.")
+	end
+	if frame then frame.guildCheck:SetChecked(on) end
+	self:Refresh()
+end
+
+-- Send the updated list to opted-in guild mates a few seconds after the last change.
+function SMA:OnOwnListChanged()
+	if not db.guildShare then return end
+	if syncTimer then syncTimer:Cancel() end
+	syncTimer = C_Timer.NewTimer(5, function()
+		syncTimer = nil
+		if not db.guildShare then return end
+		for _, peer in pairs(guildPeers) do
+			SendList(peer, "guild")
+		end
+	end)
+end
+
+-- Receiving --------------------------------------------------------------------------------------
 
 local function OnAddonMessage(prefix, text, channel, sender)
-	if prefix ~= COMM_PREFIX or channel ~= "WHISPER" then return end
+	if prefix ~= COMM_PREFIX then return end
 	if not (Accessible(text) and Accessible(sender)) or IsMe(sender) then return end
 	local senderKey = Key(sender)
 	if not senderKey then return end
 	local cmd, rest = strsplit("\t", text, 2)
 	local now = GetTime()
 
+	if channel == "GUILD" then
+		if not db.guildShare then return end
+		if cmd == "HELLO" then
+			guildPeers[senderKey] = sender
+			Enqueue("HI\t" .. sender, nil, true)
+			SendList(sender, "guild")
+		elseif cmd == "HI" then
+			guildPeers[senderKey] = sender
+			if rest and IsMe(rest) then SendList(sender, "guild") end
+		elseif cmd == "BYE" then
+			guildPeers[senderKey] = nil
+			DropGuildInbox(senderKey)
+			SMA:Refresh()
+		end
+		return
+	end
+	if channel ~= "WHISPER" then return end
+
 	if cmd == "OFFER" then
-		local count = tonumber(rest) or 0
-		StaticPopup_Show("SNOGMARRYAVOID_OFFER", Escape(DisplayName(sender)), count, sender)
+		StaticPopup_Show("SNOGMARRYAVOID_OFFER", Escape(DisplayName(sender)), tonumber(rest) or 0, sender)
 	elseif cmd == "ACCEPT" then
 		local expires = outgoingOffers[senderKey]
 		if not expires or expires < now then return end
 		outgoingOffers[senderKey] = nil
-		SendEntries(sender)
+		directAccepted[senderKey] = now + OFFER_TTL
+		Print(sender .. " accepted. Sending " .. SendList(sender, "direct") .. " entries.")
 	elseif cmd == "DECLINE" then
 		if outgoingOffers[senderKey] then
 			outgoingOffers[senderKey] = nil
-			Print(sender .. " declined your list.")
+			Print(sender .. " declined the swap.")
+		end
+	elseif cmd == "BEGIN" then
+		local allowed
+		if rest == "direct" then
+			allowed = (directAccepted[senderKey] or 0) >= now
+		elseif rest == "guild" then
+			allowed = db.guildShare and guildPeers[senderKey] ~= nil
+		end
+		if allowed then
+			transfers[senderKey] = { via = rest, entries = {}, count = 0, expires = now + OFFER_TTL }
 		end
 	elseif cmd == "E" then
-		local transfer = incoming[senderKey]
-		if not transfer or transfer.expires < now or not rest then return end
+		local t = transfers[senderKey]
+		if not t or t.expires < now or not rest or t.count >= MAX_ENTRIES then return end
 		local name, role, note = strsplit("\t", rest, 3)
 		local key = Key(name)
 		if not key or IsMe(name) then return end
-		db.shared[key] = {
+		if not t.entries[key] then t.count = t.count + 1 end
+		t.entries[key] = {
 			name = DisplayName(name),
 			role = ROLE_BY_KEY[role or ""] and role or nil,
 			note = note or "",
-			from = DisplayName(sender),
-			received = time(),
 		}
-		transfer.count = transfer.count + 1
-		transfer.expires = now + OFFER_TTL
+		t.expires = now + OFFER_TTL
 	elseif cmd == "END" then
-		local transfer = incoming[senderKey]
-		if not transfer then return end
-		incoming[senderKey] = nil
-		Print("Received " .. transfer.count .. " " .. FaceText(FACE_AVOID) .. " entries from " .. Escape(DisplayName(sender)) .. ".")
+		local t = transfers[senderKey]
+		if not t or t.expires < now then return end
+		transfers[senderKey] = nil
+		if t.via == "direct" then directAccepted[senderKey] = nil end
+		local previous = db.inbox[senderKey]
+		db.inbox[senderKey] = { from = DisplayName(sender), via = t.via, updated = time(), entries = t.entries }
+		local who = Escape(DisplayName(sender))
+		if t.via == "direct" then
+			Print("Received " .. t.count .. " " .. FaceText(FACE_AVOID) .. " entries from " .. who .. ".")
+		elseif not previous then
+			Print("Guild mate " .. who .. " shared " .. t.count .. " " .. FaceText(FACE_AVOID) .. " entries.")
+		end
 		SMA:Refresh()
 	end
 end
 
 StaticPopupDialogs["SNOGMARRYAVOID_OFFER"] = {
-	text = "SnogMarryAvoid: %s wants to share %d avoid-list entries with you.",
+	text = "SnogMarryAvoid: %s wants to swap avoid lists (they have %d).\n\nAccepting sends them your :( list too.",
 	button1 = ACCEPT or "Accept",
 	button2 = DECLINE or "Decline",
 	OnAccept = function(_, sender)
-		incoming[Key(sender)] = { expires = GetTime() + OFFER_TTL, count = 0 }
+		local senderKey = Key(sender)
+		directAccepted[senderKey] = GetTime() + OFFER_TTL
 		Enqueue("ACCEPT", sender)
+		SendList(sender, "direct")
 	end,
 	OnCancel = function(_, sender, reason)
 		if reason == "clicked" then Enqueue("DECLINE", sender) end
@@ -710,8 +855,8 @@ StaticPopupDialogs["SNOGMARRYAVOID_OFFER"] = {
 }
 
 StaticPopupDialogs["SNOGMARRYAVOID_SHARE"] = {
-	text = "Share your " .. FaceText(FACE_AVOID) .. " list with which player?",
-	button1 = "Share",
+	text = "Swap " .. FaceText(FACE_AVOID) .. " lists with which player?",
+	button1 = "Offer",
 	button2 = CANCEL or "Cancel",
 	hasEditBox = 1,
 	OnAccept = function(dialog)
@@ -810,7 +955,17 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db = SnogMarryAvoidDB
 		db.players = db.players or {}
 		db.minimap = db.minimap or {}
-		db.shared = db.shared or {}
+		db.inbox = db.inbox or {}
+		db.dismissed = db.dismissed or {}
+		if db.shared then -- 1.0 dev builds kept one flat table of shared entries
+			for key, s in pairs(db.shared) do
+				local senderKey = Key(s.from) or "?"
+				local box = db.inbox[senderKey] or { from = s.from, via = "direct", updated = s.received, entries = {} }
+				box.entries[key] = { name = s.name, role = s.role, note = s.note }
+				db.inbox[senderKey] = box
+			end
+			db.shared = nil
+		end
 		C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
 		AddMenuEntries()
 		CreateMinimapButton()
@@ -821,9 +976,15 @@ events:SetScript("OnEvent", function(self, event, ...)
 		if db then OnPartyInviteRequest(...) end
 	elseif event == "CHAT_MSG_ADDON" then
 		if db then OnAddonMessage(...) end
+	elseif event == "PLAYER_ENTERING_WORLD" then
+		local isInitialLogin, isReload = ...
+		if db and (isInitialLogin or isReload) then
+			C_Timer.After(10, function() SMA:GuildHello() end) -- guild roster/channel needs a moment
+		end
 	end
 end)
 events:RegisterEvent("CHAT_MSG_ADDON")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"
@@ -835,6 +996,8 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		db.minimap.hide = not db.minimap.hide
 		minimapButton:SetShown(not db.minimap.hide)
 		Print("Minimap button " .. (db.minimap.hide and "hidden" or "shown") .. ".")
+	elseif msg == "guild" then
+		SMA:SetGuildShare(not db.guildShare)
 	elseif msg == "share" or msg:find("^share ") then
 		local target = strtrim(msg:sub(6))
 		if target == "" then target = NameFromUnit("target") or "" end
