@@ -132,7 +132,7 @@ function SMA:GetByGUID(guid)
 end
 
 -- Avoid entries received from other players, kept per sender in db.inbox[senderKey] =
--- { from, via = "guild"|"direct", updated, entries = { [playerKey] = { name, role, note } } }.
+-- { from, via = "guild"|"direct", updated, entries = { [playerKey] = { name, role } } }. No notes.
 -- They never override your own entries, and ones you delete (db.dismissed) stay hidden.
 -- Returns the first matching entry, its key, a "from" label, and how many senders have it.
 function SMA:GetShared(name)
@@ -262,7 +262,7 @@ function SMA:Load(name, guid)
 	f.guid = guid or (entry and entry.guid) or nil
 	local source = entry or shared
 	f.nameBox:SetText(source and source.name or DisplayName(name) or "")
-	f.noteBox:SetText(source and source.note or "")
+	f.noteBox:SetText(entry and entry.note or "")
 	self:SetFace(entry and entry.face or (shared and FACE_AVOID) or 1)
 	self:SetRole(source and source.role or nil)
 	f.deleteButton:SetEnabled(source ~= nil)
@@ -373,7 +373,7 @@ function SMA:Refresh()
 				local shared, _, from, count = SMA:GetShared(key)
 				if shared then
 					if count > 1 then from = from .. " +" .. (count - 1) end
-					list[#list + 1] = { key = key, name = shared.name, face = FACE_AVOID, role = shared.role, note = shared.note, from = from }
+					list[#list + 1] = { key = key, name = shared.name, face = FACE_AVOID, role = shared.role, from = from }
 				end
 			end
 		end
@@ -447,7 +447,7 @@ local function InitRow(row, entry)
 	end
 	if entry.from then
 		row.nameText:SetText(Escape(entry.name))
-		row.noteText:SetText("|cff888888from " .. Escape(entry.from) .. "|r  " .. Escape(entry.note))
+		row.noteText:SetText("|cff888888from " .. Escape(entry.from) .. "|r")
 	else
 		row.nameText:SetText(entry.name)
 		row.noteText:SetText(entry.note or "")
@@ -563,7 +563,7 @@ function SMA:GetFrame()
 	share:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 		GameTooltip:SetText("Swap :( lists")
-		GameTooltip:AddLine("Offers a two-way swap of your own avoid entries with another player who has SnogMarryAvoid. Nothing is sent until they accept.", 1, 1, 1, true)
+		GameTooltip:AddLine("Offers a two-way swap of your own avoid entries (names and roles; notes stay private) with another player who has SnogMarryAvoid. Nothing is sent until they accept.", 1, 1, 1, true)
 		GameTooltip:Show()
 	end)
 	share:SetScript("OnLeave", GameTooltip_Hide)
@@ -751,7 +751,7 @@ end
 --   BYE                    "I've opted out": drop my list
 -- A message on the GUILD channel proves the sender is in your guild, so data is only accepted
 -- from guild senders seen on that channel this session.
--- List transfer (WHISPER): BEGIN <direct|guild>, E <name> <role> <note> per entry, END.
+-- List transfer (WHISPER): BEGIN <direct|guild>, E <name> <role> per entry, END. Notes stay private.
 -- A transfer replaces that sender's previous list, so their deletions carry over.
 -- Only your own :( entries are sent; entries you received are never passed on.
 
@@ -830,8 +830,8 @@ local function SendList(target, via)
 	local quiet = via == "guild"
 	Enqueue("BEGIN\t" .. via, target, quiet)
 	for _, entry in ipairs(list) do
-		local note = (entry.note or ""):gsub("[\t\n]", " ")
-		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or "") .. "\t" .. note, target, quiet)
+		-- Notes are private and never sent: they're personal opinions that could read as unfair to others.
+		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or ""), target, quiet)
 	end
 	Enqueue("END", target, quiet)
 	return #list
@@ -958,14 +958,13 @@ local function OnAddonMessage(prefix, text, channel, sender)
 	elseif cmd == "E" then
 		local t = transfers[senderKey]
 		if not t or t.expires < now or not rest or t.count >= MAX_ENTRIES then return end
-		local name, role, note = strsplit("\t", rest, 3)
+		local name, role = strsplit("\t", rest, 3) -- a note field from older versions is ignored
 		local key = Key(name)
 		if not key or IsMe(name) then return end
 		if not t.entries[key] then t.count = t.count + 1 end
 		t.entries[key] = {
 			name = DisplayName(name),
 			role = ROLE_BY_KEY[role or ""] and role or nil,
-			note = note or "",
 		}
 		t.expires = now + OFFER_TTL
 	elseif cmd == "END" then
@@ -986,7 +985,7 @@ local function OnAddonMessage(prefix, text, channel, sender)
 end
 
 StaticPopupDialogs["SNOGMARRYAVOID_OFFER"] = {
-	text = "SnogMarryAvoid: %s wants to swap avoid lists (they have %d).\n\nAccepting sends them your :( list too.",
+	text = "SnogMarryAvoid: %s wants to swap avoid lists (they have %d).\n\nAccepting sends them your :( list too.\nOnly names and roles are shared; notes stay private.",
 	button1 = ACCEPT or "Accept",
 	button2 = DECLINE or "Decline",
 	OnAccept = function(_, sender)
@@ -1109,10 +1108,13 @@ events:SetScript("OnEvent", function(self, event, ...)
 			for key, s in pairs(db.shared) do
 				local senderKey = Key(s.from) or "?"
 				local box = db.inbox[senderKey] or { from = s.from, via = "direct", updated = s.received, entries = {} }
-				box.entries[key] = { name = s.name, role = s.role, note = s.note }
+				box.entries[key] = { name = s.name, role = s.role }
 				db.inbox[senderKey] = box
 			end
 			db.shared = nil
+		end
+		for _, box in pairs(db.inbox) do -- notes are no longer shared; drop any received earlier
+			for _, e in pairs(box.entries) do e.note = nil end
 		end
 		C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
 		AddMenuEntries()

@@ -4,7 +4,7 @@ A WoW Forever (Interface 16001) addon for keeping an account-wide list of player
 
 - a face: green happy, yellow meh, or red avoid (written :) :| :( below)
 - a role: tank, healer, DPS or none
-- a note
+- a note (private: notes are never shared)
 
 ## Install
 
@@ -31,7 +31,7 @@ To share lists, both players need the addon (see [Sharing](#sharing--lists)).
 
 ## Sharing :( lists
 
-Sharing is always mutual. Both players agree, and both send their lists. Only your own :( entries are sent (name, role, note). Your :) and :| entries stay private, and entries you received are never passed on.
+Sharing is always mutual. Both players agree, and both send their lists. Only your own :( entries are sent, and only the name and role. **Notes are never shared**, because they're personal opinions that could come across as unfair or discriminatory to someone else. A note field sent by an older version is ignored, and notes received before this change are removed when the addon loads. Your :) and :| entries stay private, and entries you received are never passed on.
 
 ### With any player (swap)
 
@@ -66,7 +66,7 @@ Forever uses regional unique names ("First Surname", no realm). Blizzard sometim
 `SnogMarryAvoidDB.players` (account-wide SavedVariables), keyed by lowercased name:
 `{ name, face = 1|2|3, role = "TANK"|"HEALER"|"DAMAGER"|nil, note, guid, updated }`.
 
-- `inbox[senderKey] = { from, via = "direct"|"guild", updated, entries = { [playerKey] = { name, role, note } } }`: lists received from others.
+- `inbox[senderKey] = { from, via = "direct"|"guild", updated, entries = { [playerKey] = { name, role } } }`: lists received from others (no notes).
 - `dismissed[playerKey] = true`: received entries you deleted.
 - `guildShare`: guild opt-in. `minimap = { angle, hide }`.
 
