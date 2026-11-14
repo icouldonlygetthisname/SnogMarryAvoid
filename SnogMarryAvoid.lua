@@ -133,6 +133,31 @@ function SMA:IsAvoided(name, guid)
 	return entry ~= nil and entry.face == FACE_AVOID, entry
 end
 
+-- Battle.net friends are never blocked. Matched by GUID when we have one, else by character name
+-- (only online friends expose their character, so an offline friend can't be matched by name).
+function SMA:IsBNetFriend(name, guid)
+	if Accessible(guid) and guid and C_BattleNet and C_BattleNet.GetGameAccountInfoByGUID then
+		if C_BattleNet.GetGameAccountInfoByGUID(guid) then return true end
+	end
+	local key = name and Key(name)
+	if not key or not BNGetNumFriends then return false end
+	local numFriends = BNGetNumFriends()
+	for i = 1, numFriends or 0 do
+		for j = 1, C_BattleNet.GetFriendNumGameAccounts(i) or 0 do
+			local info = C_BattleNet.GetFriendGameAccountInfo(i, j)
+			local charName = info and info.characterName
+			if Accessible(charName) and charName and charName ~= "" then
+				if Key(charName) == key then return true end
+				local realm = info.realmName
+				if Accessible(realm) and realm and realm ~= "" and Key(charName .. REALM_SEP .. realm) == key then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
 local function FaceText(face)
 	local f = FACES[face]
 	return f and ("|c" .. f.color .. f.text .. "|r") or ""
@@ -164,9 +189,16 @@ local function UpdateToggleButtons(buttons, selected)
 	end
 end
 
+function SMA:UpdateBNetWarning()
+	local f = frame
+	local show = f.face == FACE_AVOID and self:IsBNetFriend(f.nameBox:GetText(), f.guid)
+	f.bnetWarning:SetShown(show)
+end
+
 function SMA:SetFace(face)
 	frame.face = face
 	UpdateToggleButtons(frame.faceButtons, face)
+	self:UpdateBNetWarning()
 end
 
 function SMA:SetRole(role)
@@ -298,6 +330,14 @@ function SMA:GetFrame()
 	f.nameBox:SetPoint("TOPLEFT", 76, -34)
 	f.nameBox:SetAutoFocus(false)
 	f.nameBox:SetScript("OnEnterPressed", function() SMA:Save() end)
+	f.nameBox:SetScript("OnTextChanged", function() SMA:UpdateBNetWarning() end)
+
+	f.bnetWarning = f:CreateFontString(nil, "OVERLAY", "GameFontRedSmall")
+	f.bnetWarning:SetPoint("TOPLEFT", 228, -70)
+	f.bnetWarning:SetPoint("RIGHT", -12, 0)
+	f.bnetWarning:SetJustifyH("LEFT")
+	f.bnetWarning:SetText("Battle.net friend: invites won't be blocked")
+	f.bnetWarning:Hide()
 
 	-- Face
 	MakeLabel(f, "Face", -68)
@@ -311,6 +351,7 @@ function SMA:GetFrame()
 			GameTooltip:SetText(face.label)
 			if i == FACE_AVOID then
 				GameTooltip:AddLine("Can't be invited; their invites are declined.", 1, 1, 1, true)
+				GameTooltip:AddLine("Battle.net friends are exempt.", 1, 0.3, 0.3, true)
 			end
 			GameTooltip:Show()
 		end)
@@ -416,7 +457,7 @@ local function WrapInvite(funcName)
 	local original = C_PartyInfo and C_PartyInfo[funcName]
 	if not original then return end
 	C_PartyInfo[funcName] = function(targetName, ...)
-		if Accessible(targetName) and SMA:IsAvoided(targetName) then
+		if Accessible(targetName) and SMA:IsAvoided(targetName) and not SMA:IsBNetFriend(targetName) then
 			Print(FaceText(FACE_AVOID) .. " " .. DisplayName(targetName) .. " is on your avoid list. Invite blocked.")
 			return
 		end
@@ -447,6 +488,7 @@ local function OnPartyInviteRequest(name, ...)
 		end
 	end
 	if not avoided then return end
+	if SMA:IsBNetFriend(name, inviterGUID) then return end
 
 	DeclineGroup()
 	HideInvitePopups()
