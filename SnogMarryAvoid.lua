@@ -10,8 +10,18 @@ local FACES = {
 	{ icon = MEDIA .. "happy", label = "Happy" },
 	{ icon = MEDIA .. "meh", label = "Meh" },
 	{ icon = MEDIA .. "avoid", label = "Avoid" },
+	{ icon = MEDIA .. "review", label = "Review" }, -- shared reports only; you can't pick it yourself
 }
 local FACE_AVOID = 3
+local FACE_REVIEW = 4
+local NUM_PICKABLE = 3
+
+-- Guilds whose members are avoided by everyone using the addon (on top of your own /sma avoidguild rules).
+local BUILTIN_GUILDS = { "Olympus" }
+
+-- A shared :( report from this many different players locks a non-guild player in as avoided.
+-- Fewer reports put them under review: not blocked, but you get a warning when you meet them.
+local STRIKES = 3
 
 local ROLES = {
 	{ key = "TANK", label = "Tank", atlas = "roleicon-tiny-tank" },
@@ -35,6 +45,18 @@ local SMA = {}
 
 local function Print(msg)
 	print(PREFIX .. msg)
+end
+
+-- Inline texture markup for a face, for chat, menus and popups.
+local function FaceText(face, size)
+	local f = FACES[face]
+	size = size or 14
+	return f and ("|T" .. f.icon .. ":" .. size .. ":" .. size .. "|t") or ""
+end
+
+-- Text from other players is shown escaped so it can't inject links, textures or colours.
+local function Escape(s)
+	return (s or ""):gsub("|", "||")
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -131,30 +153,101 @@ function SMA:GetByGUID(guid)
 	end
 end
 
+-- Returns the rule that matches a guild name (built-in or your own), or nil.
+local function MatchGuildRule(guildName)
+	if type(guildName) ~= "string" or guildName == "" then return nil end
+	local lower = strlower(guildName)
+	for _, prefix in ipairs(BUILTIN_GUILDS) do
+		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
+	end
+	for _, prefix in ipairs(db.avoidGuilds) do
+		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
+	end
+end
+
 -- Avoid entries received from other players, kept per sender in db.inbox[senderKey] =
--- { from, via = "guild"|"direct", updated, entries = { [playerKey] = { name, role } } }. No notes.
+-- { from, via = "guild"|"direct", updated, entries = { [playerKey] = { name, role, guild } } }. No notes.
 -- They never override your own entries, and ones you delete (db.dismissed) stay hidden.
--- Returns the first matching entry, its key, a "from" label, and how many senders have it.
+--
+-- A received player's status:
+--   "guild"   in an auto-avoided guild (Olympus or your own rule): avoided
+--   "strikes" reported by STRIKES or more different players: avoided
+--   "review"  reported by fewer: not blocked, but you're warned when you meet them
+-- Guild and strikes players are locked into db.locked[key] = { name, role, guild, reason, at }, so they
+-- stay avoided even if the reporters later take them off their lists.
+--
+-- Returns info = { name, role, status, face, from, count, guild }, key; or nil, key.
 function SMA:GetShared(name)
 	local key = Key(name)
 	if not key or db.dismissed[key] then return nil, key end
-	local found, from, count = nil, nil, 0
+	local found, from, count, guild = nil, nil, 0, nil
 	for _, box in pairs(db.inbox) do
 		local e = box.entries[key]
 		if e then
 			count = count + 1
 			if not found then found, from = e, box.from end
+			if not guild and MatchGuildRule(e.guild) then guild = e.guild end
 		end
 	end
-	return found, key, from, count
+	local locked = db.locked[key]
+	if not found and not locked then return nil, key end
+	guild = guild or (locked and locked.guild)
+	local status
+	if guild then
+		status = "guild"
+	elseif locked or count >= STRIKES then
+		status = "strikes"
+	else
+		status = "review"
+	end
+	local src = found or locked
+	return {
+		name = src.name,
+		role = src.role,
+		status = status,
+		face = status == "review" and FACE_REVIEW or FACE_AVOID,
+		from = from,
+		count = count,
+		guild = guild,
+	}, key
 end
 
--- Your own entry decides if you have one; otherwise a friend's shared :( entry counts.
+-- Lock in received players who are in an avoided guild or have enough strikes.
+function SMA:ApplyLocks(quiet)
+	local seen = {}
+	for _, box in pairs(db.inbox) do
+		for key in pairs(box.entries) do
+			if not seen[key] and not db.locked[key] and not db.dismissed[key] then
+				seen[key] = true
+				local info = self:GetShared(key)
+				if info and info.status ~= "review" then
+					db.locked[key] = { name = info.name, role = info.role, guild = info.guild, reason = info.status, at = time() }
+					if not quiet and not db.players[key] then
+						if info.status == "guild" then
+							Print(FaceText(FACE_AVOID) .. " " .. Escape(info.name) .. " (guild <" .. Escape(info.guild) .. ">) is now avoided.")
+						else
+							Print(FaceText(FACE_AVOID) .. " " .. Escape(info.name) .. " was reported by " .. info.count .. " players and is now avoided.")
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+-- Your own entry decides if you have one; otherwise a shared entry counts unless it's under review.
 function SMA:IsAvoided(name, guid)
 	local entry = self:Get(name) or self:GetByGUID(guid)
 	if entry then return entry.face == FACE_AVOID, entry end
-	local shared = name and self:GetShared(name)
-	return shared ~= nil, shared
+	local info = name and self:GetShared(name)
+	return info ~= nil and info.status ~= "review", info
+end
+
+-- A shared report under review (fewer than STRIKES reporters, not in an avoided guild), and no own entry.
+function SMA:GetReview(name, guid)
+	if self:Get(name) or self:GetByGUID(guid) then return nil end
+	local info = name and self:GetShared(name)
+	return info and info.status == "review" and info or nil
 end
 
 -- Battle.net friends are never blocked. Matched by GUID when we have one, else by character name
@@ -180,18 +273,6 @@ function SMA:IsBNetFriend(name, guid)
 		end
 	end
 	return false
-end
-
--- Inline texture markup for a face, for chat, menus and popups.
-local function FaceText(face, size)
-	local f = FACES[face]
-	size = size or 14
-	return f and ("|T" .. f.icon .. ":" .. size .. ":" .. size .. "|t") or ""
-end
-
--- Text from other players is shown escaped so it can't inject links, textures or colours.
-local function Escape(s)
-	return (s or ""):gsub("|", "||")
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -241,7 +322,7 @@ end
 local function UpdateRowSelected(row)
 	if row.entry then
 		local key = row.entry.key
-		row.editingBg:SetShown(key == frame.editKey or key == frame.sharedKey)
+		row.editingBg:SetShown(key ~= nil and (key == frame.editKey or key == frame.sharedKey))
 	end
 end
 
@@ -255,22 +336,28 @@ function SMA:Load(name, guid)
 	local f = self:GetFrame()
 	local entry, key, shared = nil, nil, nil
 	if name then entry, key = self:Get(name) end
-	local _, from, fromCount
-	if name and not entry then shared, _, from, fromCount = self:GetShared(name) end
+	if name and not entry then shared = self:GetShared(name) end
 	f.editKey = entry and key or nil
 	f.sharedKey = shared and key or nil
 	f.guid = guid or (entry and entry.guid) or nil
 	local source = entry or shared
 	f.nameBox:SetText(source and source.name or DisplayName(name) or "")
 	f.noteBox:SetText(entry and entry.note or "")
-	self:SetFace(entry and entry.face or (shared and FACE_AVOID) or 1)
+	self:SetFace(entry and entry.face or (shared and shared.face) or 1)
 	self:SetRole(source and source.role or nil)
 	f.deleteButton:SetEnabled(source ~= nil)
 	f.saveButton:SetText(entry and (SAVE or "Save") or "Add")
 	f.scrollBox:ForEachFrame(UpdateRowSelected)
 	if shared then
-		local by = Escape(from) .. ((fromCount or 0) > 1 and (" +" .. (fromCount - 1)) or "")
-		f.sourceText:SetText("Shared by " .. by .. ". Save to make it yours.")
+		local text
+		if shared.status == "guild" then
+			text = "Guild <" .. Escape(shared.guild) .. ">: always avoided."
+		elseif shared.status == "strikes" then
+			text = "Reported by " .. STRIKES .. "+ players: avoided."
+		else
+			text = "Under review: reported by " .. shared.count .. " of " .. STRIKES .. ". Pick a face and Save to decide yourself."
+		end
+		f.sourceText:SetText(text)
 	else
 		f.sourceText:SetText("")
 	end
@@ -283,6 +370,10 @@ function SMA:Save()
 	local name = DisplayName(f.nameBox:GetText())
 	if not name then
 		Print("Enter a player name first.")
+		return
+	end
+	if not f.face or f.face > NUM_PICKABLE then
+		Print("Pick a face first.")
 		return
 	end
 	local key = Key(name)
@@ -348,6 +439,7 @@ function SMA:Delete()
 		self:OnOwnListChanged()
 	elseif frame.sharedKey then
 		db.dismissed[frame.sharedKey] = true -- stays hidden even when the sender syncs again
+		db.locked[frame.sharedKey] = nil
 	end
 	self:Load(nil)
 	self:Refresh()
@@ -362,6 +454,7 @@ function SMA:DeleteKeys(keys)
 			ownChanged = true
 		else
 			db.dismissed[key] = true
+			db.locked[key] = nil
 		end
 		if key == frame.editKey or key == frame.sharedKey then self:Load(nil) end
 	end
@@ -382,6 +475,7 @@ function SMA:DeleteAll()
 	for key in pairs(db.players) do RemoveOwn(key) end
 	wipe(db.inbox)
 	wipe(db.dismissed)
+	wipe(db.locked)
 	wipe(frame.checked)
 	self:Load(nil)
 	self:Refresh()
@@ -404,32 +498,48 @@ function SMA:Refresh()
 		list[#list + 1] = { key = key, name = entry.name, face = entry.face, role = entry.role, note = entry.note }
 	end
 	local seen = {}
-	for _, box in pairs(db.inbox) do
-		for key in pairs(box.entries) do
-			if not seen[key] and not db.players[key] then
-				seen[key] = true
-				local shared, _, from, count = SMA:GetShared(key)
-				if shared then
-					if count > 1 then from = from .. " +" .. (count - 1) end
-					list[#list + 1] = { key = key, name = shared.name, face = FACE_AVOID, role = shared.role, from = from }
-				end
-			end
+	local function AddShared(key)
+		if seen[key] or db.players[key] then return end
+		seen[key] = true
+		local info = SMA:GetShared(key)
+		if not info then return end
+		local source
+		if info.status == "guild" then
+			source = "guild <" .. info.guild .. ">"
+		elseif info.status == "strikes" then
+			source = STRIKES .. " strikes"
+		else
+			source = "review " .. info.count .. "/" .. STRIKES
 		end
+		list[#list + 1] = { key = key, name = info.name, face = info.face, role = info.role, from = source }
 	end
+	for _, box in pairs(db.inbox) do
+		for key in pairs(box.entries) do AddShared(key) end
+	end
+	for key in pairs(db.locked) do AddShared(key) end
 	table.sort(list, function(a, b)
 		if a.face ~= b.face then return a.face < b.face end
 		return strlower(a.name) < strlower(b.name)
 	end)
+	-- the review group gets its own heading at the bottom
+	for i, item in ipairs(list) do
+		if item.face == FACE_REVIEW then
+			table.insert(list, i, { header = FaceText(FACE_REVIEW) .. " Under review: reported, but not by " .. STRIKES .. " players yet. Proceed with care." })
+			break
+		end
+	end
 	-- drop ticks for entries that no longer exist
-	local present = {}
-	for _, item in ipairs(list) do present[item.key] = true end
+	local present, count = {}, 0
+	for _, item in ipairs(list) do
+		if item.key then present[item.key] = true; count = count + 1 end
+	end
 	for key in pairs(frame.checked) do
 		if not present[key] then frame.checked[key] = nil end
 	end
-	frame.listCount = #list
+	frame.listCount = count
 	frame.scrollBox:SetDataProvider(CreateDataProvider(list), ScrollBoxConstants.RetainScrollPosition)
-	frame.countText:SetText(#list .. " players")
-	frame.deleteAllButton:SetEnabled(#list > 0)
+	frame.countText:SetText(count .. " players")
+	frame.deleteAllButton:SetEnabled(count > 0)
 	self:UpdateSelectionButtons()
 end
 
@@ -470,9 +580,29 @@ local function InitRow(row, entry)
 		row.noteText:SetPoint("RIGHT", row.editButton, "LEFT", -4, 0)
 		row.noteText:SetJustifyH("LEFT")
 		row.noteText:SetWordWrap(false)
-		row:SetScript("OnClick", function(self) SMA:Load(self.entry.name) end)
+		row:SetScript("OnClick", function(self)
+			if self.entry.key then SMA:Load(self.entry.name) end
+		end)
 	end
 	row.entry = entry
+	local isHeader = entry.header ~= nil
+	row.check:SetShown(not isHeader)
+	row.editButton:SetShown(not isHeader)
+	row.faceIcon:SetShown(not isHeader)
+	row.noteText:SetShown(not isHeader)
+	row.nameText:ClearAllPoints()
+	if isHeader then
+		row.roleIcon:Hide()
+		row.editingBg:Hide()
+		row.nameText:SetPoint("LEFT", 4, 0)
+		row.nameText:SetPoint("RIGHT", -4, 0)
+		row.nameText:SetFontObject("GameFontNormalSmall")
+		row.nameText:SetText(entry.header)
+		return
+	end
+	row.nameText:SetPoint("LEFT", 66, 0)
+	row.nameText:SetWidth(130)
+	row.nameText:SetFontObject("GameFontHighlight")
 	row.check:SetChecked(frame.checked[entry.key] ~= nil)
 	row.faceIcon:SetTexture(FACES[entry.face] and FACES[entry.face].icon or nil)
 	UpdateRowSelected(row)
@@ -533,7 +663,8 @@ function SMA:GetFrame()
 	-- Face
 	MakeLabel(f, "Face", -68)
 	f.faceButtons = {}
-	for i, face in ipairs(FACES) do
+	for i = 1, NUM_PICKABLE do
+		local face = FACES[i]
 		local b = CreateFrame("Button", nil, f)
 		b:SetSize(30, 30)
 		b:SetPoint("TOPLEFT", 74 + (i - 1) * 36, -60)
@@ -649,9 +780,13 @@ function SMA:GetFrame()
 	f.selectAll:SetScript("OnClick", function(self)
 		wipe(f.checked)
 		if self:GetChecked() then
-			f.scrollBox:GetDataProvider():ForEach(function(item) f.checked[item.key] = true end)
+			f.scrollBox:GetDataProvider():ForEach(function(item)
+				if item.key then f.checked[item.key] = true end
+			end)
 		end
-		f.scrollBox:ForEachFrame(function(row) row.check:SetChecked(f.checked[row.entry.key] ~= nil) end)
+		f.scrollBox:ForEachFrame(function(row)
+			row.check:SetChecked(row.entry.key ~= nil and f.checked[row.entry.key] ~= nil)
+		end)
 		SMA:UpdateSelectionButtons()
 	end)
 
@@ -738,7 +873,8 @@ local function AddMenuEntries()
 			if not name then return end
 			local unit = contextData and contextData.unit
 			local entry = SMA:Get(name)
-			local face = entry and entry.face or (SMA:GetShared(name) and FACE_AVOID)
+			local shared = not entry and SMA:GetShared(name)
+			local face = entry and entry.face or (shared and shared.face)
 			local text = "SnogMarryAvoid"
 			if face then text = FaceText(face) .. " " .. text end
 			rootDescription:CreateDivider()
@@ -752,7 +888,8 @@ local function AddMenuEntries()
 				SMA:QuickTag(name, guid, unit, f)
 				return MenuResponse and MenuResponse.Close
 			end
-			for i, f in ipairs(FACES) do
+			for i = 1, NUM_PICKABLE do
+				local f = FACES[i]
 				sub:CreateRadio(FaceText(i) .. " " .. f.label, IsSelected, SetSelected, i)
 			end
 			sub:CreateDivider()
@@ -768,6 +905,33 @@ end
 -- Invite blocking
 ----------------------------------------------------------------------------------------------------
 
+-- On-screen warning (raid warning style) for a player under review. Nothing is blocked.
+-- At most once per player every few minutes, so a chatty whisperer doesn't flood the screen.
+local REVIEW_WARN_COOLDOWN = 300
+local reviewWarned = {} -- [key] = GetTime()
+
+function SMA:WarnReview(name, guid)
+	if not db or not Accessible(name) or not name then return end
+	if not Accessible(guid) then guid = nil end
+	local info = self:GetReview(name, guid)
+	if not info then return end
+	local key = Key(name)
+	local now = GetTime()
+	if reviewWarned[key] and now - reviewWarned[key] < REVIEW_WARN_COOLDOWN then return end
+	if self:IsBNetFriend(name, guid) then return end
+	reviewWarned[key] = now
+	local who = Escape(info.name)
+	local text = FaceText(FACE_REVIEW, 24) .. " " .. who .. ": previous poor behaviour reported. Proceed with care."
+	if RaidWarningUtil and RaidWarningUtil.AddMessage then
+		RaidWarningUtil.AddMessage(text, ChatTypeInfo and ChatTypeInfo["RAID_WARNING"], 8)
+	elseif RaidNotice_AddMessage and RaidWarningFrame then
+		RaidNotice_AddMessage(RaidWarningFrame, text, ChatTypeInfo and ChatTypeInfo["RAID_WARNING"], 8)
+	end
+	if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
+	Print(FaceText(FACE_REVIEW) .. " " .. who .. " is under review (reported by " .. info.count .. " of " .. STRIKES
+		.. " players). Previous poor behaviour reported, proceed with care.")
+end
+
 -- Wrap the outgoing invite functions so :( players are never invited (menus, /invite, friends list).
 local function WrapInvite(funcName)
 	local original = C_PartyInfo and C_PartyInfo[funcName]
@@ -777,6 +941,7 @@ local function WrapInvite(funcName)
 			Print(FaceText(FACE_AVOID) .. " " .. DisplayName(targetName) .. " is on your avoid list. Invite blocked.")
 			return
 		end
+		if Accessible(targetName) then SMA:WarnReview(targetName) end
 		return original(targetName, ...)
 	end
 end
@@ -803,7 +968,10 @@ local function OnPartyInviteRequest(name, ...)
 			end
 		end
 	end
-	if not avoided then return end
+	if not avoided then
+		SMA:WarnReview(name, inviterGUID)
+		return
+	end
 	if SMA:IsBNetFriend(name, inviterGUID) then return end
 
 	DeclineGroup()
@@ -876,22 +1044,21 @@ end
 -- The game only tells us someone's guild for a unit (target, mouseover, group member, nameplate),
 -- so players are picked up when you see them that way, not from chat names or invites alone.
 
-local function MatchGuildRule(guildName)
-	local lower = strlower(guildName)
-	for _, prefix in ipairs(db.avoidGuilds) do
-		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
-	end
-end
-
 function SMA:CheckUnitGuild(unit)
-	if not db or #db.avoidGuilds == 0 then return end
+	if not db then return end
 	local name = NameFromUnit(unit)
 	if not name or IsMe(name) then return end
 	local display = DisplayName(name)
 	local key = display and Key(display)
-	if not key or db.players[key] or db.autoSkip[key] then return end
+	if not key then return end
 	local guildName = GetGuildInfo(unit)
 	if not Accessible(guildName) or not guildName or guildName == "" then return end
+	local own = db.players[key]
+	if own then
+		own.guild = guildName -- remembered so it goes out with your shared :( entries
+		return
+	end
+	if db.autoSkip[key] then return end
 	local myGuild = GetGuildInfo("player")
 	if Accessible(myGuild) and myGuild == guildName then return end -- never your own guild mates
 	if not MatchGuildRule(guildName) then return end
@@ -910,6 +1077,7 @@ function SMA:CheckUnitGuild(unit)
 		note = "Auto: guild <" .. guildName .. ">",
 		guid = Accessible(guid) and guid or nil,
 		auto = guildName,
+		guild = guildName,
 		updated = time(),
 	}
 	Print(FaceText(FACE_AVOID) .. " Added " .. Escape(display) .. " (guild <" .. Escape(guildName) .. ">).")
@@ -917,11 +1085,29 @@ function SMA:CheckUnitGuild(unit)
 	self:OnOwnListChanged()
 end
 
+-- Players already warned about in the current group, so a roster update doesn't repeat it.
+local groupWarned = {}
+
 function SMA:CheckGroup()
+	if not IsInGroup() then
+		wipe(groupWarned)
+		return
+	end
+	local units = {}
 	if IsInRaid() then
-		for i = 1, GetNumGroupMembers() do self:CheckUnitGuild("raid" .. i) end
+		for i = 1, GetNumGroupMembers() do units[#units + 1] = "raid" .. i end
 	else
-		for i = 1, 4 do self:CheckUnitGuild("party" .. i) end
+		for i = 1, 4 do units[#units + 1] = "party" .. i end
+	end
+	for _, unit in ipairs(units) do
+		self:CheckUnitGuild(unit)
+		local name = NameFromUnit(unit)
+		local key = name and Key(name)
+		if key and not groupWarned[key] then
+			groupWarned[key] = true
+			local guid = UnitGUID(unit)
+			self:WarnReview(name, guid)
+		end
 	end
 end
 
@@ -931,7 +1117,17 @@ function SMA:GuildRuleCommand(args)
 	if action ~= "add" and action ~= "remove" then
 		action, prefix = (args ~= "" and "add" or nil), strtrim(args)
 	end
+	local function IsBuiltin(p)
+		for _, b in ipairs(BUILTIN_GUILDS) do
+			if strlower(b) == strlower(p) then return b end
+		end
+	end
+	if action == "remove" and prefix ~= "" and IsBuiltin(prefix) then
+		Print("\"" .. IsBuiltin(prefix) .. "\" is built in for everyone and can't be removed.")
+		return
+	end
 	if action == "add" and prefix ~= "" then
+		if IsBuiltin(prefix) then Print("\"" .. IsBuiltin(prefix) .. "\" is already built in.") return end
 		for _, p in ipairs(db.avoidGuilds) do
 			if strlower(p) == strlower(prefix) then Print("Already avoiding guilds starting with \"" .. p .. "\".") return end
 		end
@@ -958,10 +1154,11 @@ function SMA:GuildRuleCommand(args)
 		if frame and frame:IsShown() then self:Refresh() end
 		if n > 0 then self:OnOwnListChanged() end
 	else
+		Print("Built in for everyone: guilds starting with " .. table.concat(BUILTIN_GUILDS, ", ") .. ".")
 		if #db.avoidGuilds == 0 then
-			Print("No guild rules. Add one with /sma avoidguild <start of guild name>.")
+			Print("Your own rules: none. Add one with /sma avoidguild <start of guild name>.")
 		else
-			Print("Auto-avoiding guilds starting with: " .. table.concat(db.avoidGuilds, ", "))
+			Print("Your own rules: " .. table.concat(db.avoidGuilds, ", ") .. ".")
 		end
 	end
 end
@@ -1065,7 +1262,10 @@ local function SendList(target, via)
 	Enqueue("BEGIN\t" .. via, target, quiet)
 	for _, entry in ipairs(list) do
 		-- Notes are private and never sent: they're personal opinions that could read as unfair to others.
-		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or ""), target, quiet)
+		-- The guild (prefixed "G:", so older versions that read a note field here can't confuse it)
+		-- lets the receiver tell an always-avoided guild member from a one-off report.
+		local guild = entry.guild or entry.auto
+		Enqueue("E\t" .. entry.name .. "\t" .. (entry.role or "") .. (guild and ("\tG:" .. guild) or ""), target, quiet)
 	end
 	Enqueue("END", target, quiet)
 	return #list
@@ -1192,13 +1392,15 @@ local function OnAddonMessage(prefix, text, channel, sender)
 	elseif cmd == "E" then
 		local t = transfers[senderKey]
 		if not t or t.expires < now or not rest or t.count >= MAX_ENTRIES then return end
-		local name, role = strsplit("\t", rest, 3) -- a note field from older versions is ignored
+		local name, role, extra = strsplit("\t", rest, 3) -- extra: "G:<guild>", or a note from v1.0 (ignored)
 		local key = Key(name)
 		if not key or IsMe(name) then return end
+		local guild = extra and extra:match("^G:(.+)$")
 		if not t.entries[key] then t.count = t.count + 1 end
 		t.entries[key] = {
 			name = DisplayName(name),
 			role = ROLE_BY_KEY[role or ""] and role or nil,
+			guild = guild and guild:sub(1, 48) or nil,
 		}
 		t.expires = now + OFFER_TTL
 	elseif cmd == "END" then
@@ -1214,6 +1416,7 @@ local function OnAddonMessage(prefix, text, channel, sender)
 		elseif not previous then
 			Print("Guild mate " .. who .. " shared " .. t.count .. " " .. FaceText(FACE_AVOID) .. " entries.")
 		end
+		SMA:ApplyLocks()
 		SMA:Refresh()
 	end
 end
@@ -1341,6 +1544,12 @@ events:SetScript("OnEvent", function(self, event, ...)
 		if db.ignore == nil then db.ignore = true end
 		db.avoidGuilds = db.avoidGuilds or {}
 		db.autoSkip = db.autoSkip or {}
+		db.locked = db.locked or {}
+		for i = #db.avoidGuilds, 1, -1 do -- built-in rules don't need a personal copy
+			for _, b in ipairs(BUILTIN_GUILDS) do
+				if strlower(db.avoidGuilds[i]) == strlower(b) then table.remove(db.avoidGuilds, i) break end
+			end
+		end
 		if db.shared then -- 1.0 dev builds kept one flat table of shared entries
 			for key, s in pairs(db.shared) do
 				local senderKey = Key(s.from) or "?"
@@ -1353,6 +1562,7 @@ events:SetScript("OnEvent", function(self, event, ...)
 		for _, box in pairs(db.inbox) do -- notes are no longer shared; drop any received earlier
 			for _, e in pairs(box.entries) do e.note = nil end
 		end
+		SMA:ApplyLocks(true)
 		C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
 		AddMenuEntries()
 		CreateMinimapButton()
@@ -1369,7 +1579,12 @@ events:SetScript("OnEvent", function(self, event, ...)
 	elseif event == "NAME_PLATE_UNIT_ADDED" then
 		SMA:CheckUnitGuild((...))
 	elseif event == "GROUP_ROSTER_UPDATE" then
-		if db and #db.avoidGuilds > 0 then SMA:CheckGroup() end
+		if db then SMA:CheckGroup() end
+	elseif event == "CHAT_MSG_WHISPER" then
+		if db then
+			local _, sender = ...
+			SMA:WarnReview(sender, (select(12, ...)))
+		end
 	elseif event == "DUEL_REQUESTED" then
 		if db then OnDuelRequested(...) end
 	elseif event == "TRADE_REQUEST" then
@@ -1391,6 +1606,7 @@ events:RegisterEvent("PLAYER_TARGET_CHANGED")
 events:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
 events:RegisterEvent("GROUP_ROSTER_UPDATE")
+events:RegisterEvent("CHAT_MSG_WHISPER")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"

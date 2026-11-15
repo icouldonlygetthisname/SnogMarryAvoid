@@ -9,7 +9,10 @@ local FACES = {
 	happy = { fill = { 0.30, 0.85, 0.25 }, mouth = "smile" },
 	meh   = { fill = { 1.00, 0.80, 0.10 }, mouth = "flat" },
 	avoid = { fill = { 0.92, 0.22, 0.20 }, mouth = "frown" },
+	review = { fill = { 1.00, 0.55, 0.10 }, mouth = "slant", brow = true, hand = true },
 }
+
+local SKIN = { 1.00, 0.82, 0.58 }
 
 local DARK = { 0.12, 0.08, 0.05 }
 
@@ -42,6 +45,19 @@ local function sample(face, x, y)
 	local c = SIZE / 2
 	local R = 29
 	local d = dist(x, y, c, c)
+
+	-- thinking: a fist under the chin with a finger raised to the mouth, drawn over the face
+	if face.hand then
+		-- signed-ish "inside" measure: <= 0 inside the hand shape, outline band up to 1.6px outside
+		local fist = (dist(x, y * 1.5, c + 10, (c + 21.5) * 1.5) - 10)
+		local finger = distSegment(x, y, c + 3, c + 18, c + 1, c + 11) - 2.8
+		local inside = math.min(fist, finger)
+		if inside <= 0 then
+			if inside > -1.4 then return DARK[1], DARK[2], DARK[3], 1 end
+			return SKIN[1], SKIN[2], SKIN[3], 1
+		end
+	end
+
 	if d > R then return 0, 0, 0, 0 end
 
 	-- outline
@@ -52,8 +68,14 @@ local function sample(face, x, y)
 	if ((x - (c - eyeDX)) / 3.2) ^ 2 + ((y - eyeY) / 5) ^ 2 <= 1 then return DARK[1], DARK[2], DARK[3], 1 end
 	if ((x - (c + eyeDX)) / 3.2) ^ 2 + ((y - eyeY) / 5) ^ 2 <= 1 then return DARK[1], DARK[2], DARK[3], 1 end
 
+	if face.brow and distSegment(x, y, c + 4, c - 15, c + 13, c - 19) <= 1.8 then
+		return DARK[1], DARK[2], DARK[3], 1
+	end
+
 	local mouthD
-	if face.mouth == "smile" then
+	if face.mouth == "slant" then
+		mouthD = distSegment(x, y, c - 12, c + 10, c - 1, c + 7)
+	elseif face.mouth == "smile" then
 		mouthD = distArc(x, y, c, c + 1, 15, math.rad(25), math.rad(155))
 	elseif face.mouth == "frown" then
 		mouthD = distArc(x, y, c, c + 24, 13, math.rad(-150), math.rad(-30))
