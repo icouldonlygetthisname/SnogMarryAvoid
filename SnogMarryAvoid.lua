@@ -1361,10 +1361,10 @@ local function ProcessSendQueue()
 	end
 end
 
-local function Enqueue(msg, target, quiet)
+local function Enqueue(msg, target, quiet, chatType)
 	sendQueue[#sendQueue + 1] = {
 		msg = TruncateUTF8(msg, MAX_MSG),
-		chatType = target and "WHISPER" or "GUILD",
+		chatType = chatType or (target and "WHISPER" or "GUILD"),
 		target = target,
 		quiet = quiet,
 	}
@@ -1379,6 +1379,80 @@ local function OwnAvoidEntries()
 		if entry.face == FACE_AVOID then list[#list + 1] = entry end
 	end
 	return list
+end
+
+-- Version check ----------------------------------------------------------------------------------
+-- "VER <version>" goes to the guild at login and to your group when you join one. Hearing a newer
+-- version prints a download notice (again at each login until you update). Someone on an older
+-- version gets a whisper back, once per session, so they hear about it too. No personal data.
+
+local RELEASES_URL = "https://github.com/icouldonlygetthisname/SnogMarryAvoid/releases"
+local GetMetadata = C_AddOns and C_AddOns.GetAddOnMetadata
+local MY_VERSION = GetMetadata and GetMetadata(ADDON_NAME, "Version")
+if type(MY_VERSION) ~= "string" then MY_VERSION = "0" end
+local versionNotified -- the version last announced this session
+local versionReplied = {} -- [senderKey] = true
+local lastGroupVersionSend = 0
+
+-- Compares dotted versions: returns true if a is newer than b.
+local function IsNewer(a, b)
+	local pa, pb = {}, {}
+	for n in tostring(a):gmatch("%d+") do pa[#pa + 1] = tonumber(n) end
+	for n in tostring(b):gmatch("%d+") do pb[#pb + 1] = tonumber(n) end
+	for i = 1, math.max(#pa, #pb) do
+		local x, y = pa[i] or 0, pb[i] or 0
+		if x ~= y then return x > y end
+	end
+	return false
+end
+
+local function NotifyNewVersion(version)
+	if versionNotified and not IsNewer(version, versionNotified) then return end
+	versionNotified = version
+	Print("A newer version (" .. Escape(version) .. ") is available. You have " .. MY_VERSION
+		.. ". Download it from " .. RELEASES_URL)
+end
+
+function SMA:SendVersion(where)
+	local msg = "VER\t" .. MY_VERSION
+	if where == "guild" then
+		if IsInGuild() then Enqueue(msg, nil, true, "GUILD") end
+	elseif where == "group" then
+		local now = GetTime()
+		if now - lastGroupVersionSend < 60 then return end
+		local chatType
+		if LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
+			chatType = "INSTANCE_CHAT"
+		elseif IsInRaid() then
+			chatType = "RAID"
+		elseif IsInGroup() then
+			chatType = "PARTY"
+		end
+		if chatType then
+			lastGroupVersionSend = now
+			Enqueue(msg, nil, true, chatType)
+		end
+	end
+end
+
+-- Called at login: repeat the notice if a newer version was seen in an earlier session.
+function SMA:CheckSavedVersion()
+	if db.newestVersion and IsNewer(db.newestVersion, MY_VERSION) then
+		NotifyNewVersion(db.newestVersion)
+	else
+		db.newestVersion = nil
+	end
+end
+
+local function OnVersion(version, sender, senderKey)
+	if not version or not version:match("^%d+[%d%.]*$") or #version > 20 then return end
+	if IsNewer(version, MY_VERSION) then
+		if not db.newestVersion or IsNewer(version, db.newestVersion) then db.newestVersion = version end
+		NotifyNewVersion(version)
+	elseif IsNewer(MY_VERSION, version) and not versionReplied[senderKey] then
+		versionReplied[senderKey] = true
+		Enqueue("VER\t" .. MY_VERSION, sender, true)
+	end
 end
 
 local function SendList(target, via)
@@ -1542,6 +1616,11 @@ local function OnAddonMessage(prefix, text, channel, sender)
 	if not senderKey then return end
 	local cmd, rest = strsplit("\t", text, 2)
 	local now = GetTime()
+
+	if cmd == "VER" then
+		OnVersion(rest, sender, senderKey)
+		return
+	end
 
 	if channel == "GUILD" then
 		if not db.guildShare or db.consent ~= true then return end
@@ -1792,7 +1871,10 @@ events:SetScript("OnEvent", function(self, event, ...)
 	elseif event == "NAME_PLATE_UNIT_ADDED" then
 		SMA:CheckUnitGuild((...))
 	elseif event == "GROUP_ROSTER_UPDATE" then
-		if db then SMA:CheckGroup() end
+		if db then
+			SMA:CheckGroup()
+			SMA:SendVersion("group")
+		end
 	elseif event == "CHAT_MSG_WHISPER" then
 		if db then
 			local _, sender = ...
@@ -1807,7 +1889,12 @@ events:SetScript("OnEvent", function(self, event, ...)
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		local isInitialLogin, isReload = ...
 		if db and (isInitialLogin or isReload) then
-			C_Timer.After(10, function() SMA:GuildHello() end) -- guild roster/channel needs a moment
+			C_Timer.After(10, function() -- guild roster/channel needs a moment
+				SMA:GuildHello()
+				SMA:SendVersion("guild")
+				SMA:SendVersion("group")
+			end)
+			SMA:CheckSavedVersion()
 		end
 	end
 end)

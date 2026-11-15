@@ -17,6 +17,8 @@ You can also give each player a role (tank, healer or DPS) and a private note. Y
 2. Extract it into `World of Warcraft\_forever_\Interface\AddOns\`, so that you have `AddOns\SnogMarryAvoid\SnogMarryAvoid.toc`.
 3. Restart the game. `/reload` won't pick up a newly installed addon.
 
+When a guild mate or someone in your group has a newer version, the addon tells you in chat when you log in, with a link to download it. To update, replace the folder and `/reload`.
+
 ## Tagging players
 
 - **Right-click a player** (a chat name, party or raid frame, target, friends list or guild roster) and hover over **SnogMarryAvoid**. Pick a face to tag them in one click. Choose **Add with note and role...** to open the window with them filled in.
