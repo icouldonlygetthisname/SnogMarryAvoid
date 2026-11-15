@@ -1356,7 +1356,7 @@ local function SendList(target, via)
 	local list = OwnAvoidEntries()
 	local quiet = via == "guild"
 	Enqueue("BEGIN\t" .. via, target, quiet)
-	local code = ReporterCode()
+	local code = db.consent == true and ReporterCode() or nil -- only with the player's consent
 	if code then Enqueue("ID\t" .. code, target, quiet) end -- a separate message, so older versions ignore it
 	for _, entry in ipairs(list) do
 		-- Notes are private and never sent: they're personal opinions that could read as unfair to others.
@@ -1369,6 +1369,59 @@ local function SendList(target, via)
 	return #list
 end
 
+-- Consent ----------------------------------------------------------------------------------------
+-- Asked before you first share, in any way. Same wording as the README's "Privacy and your BattleTag".
+
+local CONSENT_TEXT = "SnogMarryAvoid: Privacy and your BattleTag\n\n"
+	.. "To stop one person from using several characters to report the same player more than once, "
+	.. "the addon uses your BattleTag in an anonymised form when you share your list:\n\n"
+	.. "- Your BattleTag is never sent, saved or shown to anyone.\n"
+	.. "- What's shared can't be turned back into your BattleTag. It can't be traced to you, "
+	.. "and it can't be used to confirm who you are.\n"
+	.. "- It's only used when you share your list. If you never share, it's never used.\n\n"
+	.. "By sharing your list, you consent to your BattleTag being used in this anonymised way. "
+	.. "If you don't want that, don't share. The rest of the addon works without it."
+
+StaticPopupDialogs["SNOGMARRYAVOID_CONSENT"] = {
+	text = CONSENT_TEXT,
+	button1 = "I agree",
+	button2 = "Don't share",
+	OnAccept = function(_, data)
+		local first = db.consent ~= true
+		db.consent = true
+		if first then Print("Thanks. You can read this again or withdraw with /sma privacy.") end
+		if data and data.onAgree then data.onAgree() end
+	end,
+	OnCancel = function(_, data, reason)
+		if data and data.onDecline then data.onDecline(reason) end
+	end,
+	timeout = 0,
+	whileDead = 1,
+	hideOnEscape = 1,
+}
+
+-- Run fn if the player has agreed; otherwise ask first. onDecline(reason) runs if they don't.
+local function WithConsent(fn, onDecline)
+	if db.consent == true then
+		fn()
+	else
+		StaticPopup_Show("SNOGMARRYAVOID_CONSENT", nil, nil, { onAgree = fn, onDecline = onDecline })
+	end
+end
+
+-- /sma privacy: show the text again. "Don't share" withdraws consent and stops guild sharing.
+function SMA:ShowPrivacy()
+	StaticPopup_Show("SNOGMARRYAVOID_CONSENT", nil, nil, {
+		onDecline = function(reason)
+			if reason ~= "clicked" then return end
+			local had = db.consent == true
+			db.consent = false
+			if db.guildShare then self:SetGuildShare(false) end
+			if had then Print("Consent withdrawn. You'll be asked again before you next share.") end
+		end,
+	})
+end
+
 -- Direct swap ------------------------------------------------------------------------------------
 
 function SMA:Share(target)
@@ -1379,6 +1432,10 @@ function SMA:Share(target)
 	end
 	if IsMe(target) then
 		Print("You can't swap with yourself.")
+		return
+	end
+	if db.consent ~= true then
+		WithConsent(function() self:Share(target) end)
 		return
 	end
 	outgoingOffers[Key(target)] = GetTime() + OFFER_TTL
@@ -1397,13 +1454,24 @@ local function DropGuildInbox(senderKey)
 end
 
 function SMA:GuildHello()
-	if db.guildShare and IsInGuild() then
-		Enqueue("HELLO", nil, true)
+	if not (db.guildShare and IsInGuild()) then return end
+	if db.consent ~= true then
+		-- guild sharing was on before consent was asked for (older version): ask now
+		WithConsent(function() self:GuildHello() end, function(reason)
+			if reason == "clicked" then self:SetGuildShare(false) end
+		end)
+		return
 	end
+	Enqueue("HELLO", nil, true)
 end
 
 function SMA:SetGuildShare(on)
 	on = not not on
+	if on and db.consent ~= true then
+		if frame then frame.guildCheck:SetChecked(db.guildShare) end -- undo the tick until they agree
+		WithConsent(function() self:SetGuildShare(true) end)
+		return
+	end
 	if on == not not db.guildShare then return end
 	db.guildShare = on
 	if on then
@@ -1425,7 +1493,7 @@ end
 
 -- Send the updated list to opted-in guild mates a few seconds after the last change.
 function SMA:OnOwnListChanged()
-	if not db.guildShare then return end
+	if not db.guildShare or db.consent ~= true then return end
 	if syncTimer then syncTimer:Cancel() end
 	syncTimer = C_Timer.NewTimer(5, function()
 		syncTimer = nil
@@ -1447,7 +1515,7 @@ local function OnAddonMessage(prefix, text, channel, sender)
 	local now = GetTime()
 
 	if channel == "GUILD" then
-		if not db.guildShare then return end
+		if not db.guildShare or db.consent ~= true then return end
 		if cmd == "HELLO" then
 			guildPeers[senderKey] = sender
 			Enqueue("HI\t" .. sender, nil, true)
@@ -1530,10 +1598,14 @@ StaticPopupDialogs["SNOGMARRYAVOID_OFFER"] = {
 	button1 = ACCEPT or "Accept",
 	button2 = DECLINE or "Decline",
 	OnAccept = function(_, sender)
-		local senderKey = Key(sender)
-		directAccepted[senderKey] = GetTime() + OFFER_TTL
-		Enqueue("ACCEPT", sender)
-		SendList(sender, "direct")
+		WithConsent(function()
+			local senderKey = Key(sender)
+			directAccepted[senderKey] = GetTime() + OFFER_TTL
+			Enqueue("ACCEPT", sender)
+			SendList(sender, "direct")
+		end, function(reason)
+			if reason == "clicked" then Enqueue("DECLINE", sender) end
+		end)
 	end,
 	OnCancel = function(_, sender, reason)
 		if reason == "clicked" then Enqueue("DECLINE", sender) end
@@ -1730,6 +1802,8 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		db.minimap.hide = not db.minimap.hide
 		minimapButton:SetShown(not db.minimap.hide)
 		Print("Minimap button " .. (db.minimap.hide and "hidden" or "shown") .. ".")
+	elseif msg == "privacy" or msg == "consent" then
+		SMA:ShowPrivacy()
 	elseif msg == "guild" then
 		SMA:SetGuildShare(not db.guildShare)
 	elseif msg == "ignore" then

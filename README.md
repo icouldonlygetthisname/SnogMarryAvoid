@@ -65,6 +65,8 @@ To stop one person from using several characters to report the same player more 
 
 **By sharing your list, you consent to your BattleTag being used in this anonymised way.** If you don't want that, don't share. The rest of the addon works without it.
 
+The addon shows you this the first time you share and asks you to agree. Nothing is shared until you do. Type `/sma privacy` to read it again or to withdraw your consent, which also stops guild sharing.
+
 ## Commands
 
 | Command | What it does |
@@ -77,6 +79,7 @@ To stop one person from using several characters to report the same player more 
 | `/sma ignore` | Turn ignoring avoided players on or off |
 | `/sma avoidguild [name]` | List your guild rules, or add one |
 | `/sma avoidguild remove <name>` | Remove one of your guild rules |
+| `/sma privacy` | Read the privacy notice again, or withdraw consent |
 | `/sma minimap` | Show or hide the minimap button |
 
 ## Licence
