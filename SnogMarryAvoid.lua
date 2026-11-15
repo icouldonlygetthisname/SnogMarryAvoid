@@ -100,9 +100,11 @@ end
 ----------------------------------------------------------------------------------------------------
 -- Names
 ----------------------------------------------------------------------------------------------------
--- WoW Forever uses regional unique names: a player is "First Surname" with no realm, and
--- UnitName() returns ("First Surname", "Surname"). Blizzard sometimes joins the surname with the
--- realm separator instead ("First-Surname"), so both forms are folded into one key.
+-- WoW Forever uses regional unique names: a player is "First Surname" with no realm. For units,
+-- UnitName()/UnitNameUnmodified() return (name, surname), where name is sometimes just "First" and
+-- sometimes already "First Surname" (Blizzard's NameUtil.GetUnitFirstName says as much). Blizzard
+-- also sometimes joins the surname with the realm separator ("First-Surname"), so both forms are
+-- folded into one key.
 
 local seps = Constants and Constants.CharacterNameSeparatorConsts
 local SURNAME_SEP = seps and seps.CHARACTERNAME_SURNAME_SEPARATOR or " "
@@ -141,12 +143,30 @@ local function NameFromUnit(unit)
 	if not Accessible(unit) or not UnitExists(unit) then return nil end
 	local isPlayer = UnitIsPlayer(unit)
 	if not Accessible(isPlayer) or not isPlayer then return nil end
-	local name, second = UnitName(unit)
-	if not Accessible(name) then return nil end
-	if not RegionalNames() and Accessible(second) and second and second ~= "" then
-		name = name .. REALM_SEP .. second
+	local name, second
+	if UnitNameUnmodified then name, second = UnitNameUnmodified(unit) end
+	if type(name) ~= "string" or not Accessible(name) then name, second = UnitName(unit) end
+	if type(name) ~= "string" or not Accessible(name) then return nil end
+	if type(second) == "string" and Accessible(second) and second ~= "" then
+		if RegionalNames() then
+			-- add the surname unless the name already ends with it
+			local lname, lsur = strlower(name), strlower(second)
+			if lname ~= lsur and lname:sub(-#lsur - #SURNAME_SEP) ~= strlower(SURNAME_SEP) .. lsur
+				and lname:sub(-#lsur - #REALM_SEP) ~= strlower(REALM_SEP) .. lsur then
+				name = name .. SURNAME_SEP .. second
+			end
+		else
+			name = name .. REALM_SEP .. second
+		end
 	end
 	return name
+end
+
+-- The first name alone, for moving entries saved before surnames were read from units.
+local function FirstNameKey(display)
+	if not RegionalNames() or not display then return nil end
+	local i = display:find(SURNAME_SEP, 1, true)
+	return i and strlower(display:sub(1, i - 1)) or nil
 end
 
 local function IsMe(name)
@@ -1144,6 +1164,15 @@ function SMA:CheckUnitGuild(unit)
 	if not key then return end
 	local guildName = GetGuildInfo(unit)
 	if not Accessible(guildName) or not guildName or guildName == "" then return end
+	local firstKey = FirstNameKey(display)
+	local old = firstKey and firstKey ~= key and db.players[firstKey]
+	if old and old.auto and not db.players[key] and old.guild == guildName then
+		-- saved by an older version without the surname: move it to the full name
+		db.players[firstKey] = nil
+		old.name = display
+		db.players[key] = old
+		if frame and frame:IsShown() then self:Refresh() end
+	end
 	local own = db.players[key]
 	if own then
 		own.guild = guildName -- remembered so it goes out with your shared :( entries
