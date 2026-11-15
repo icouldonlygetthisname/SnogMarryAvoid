@@ -23,6 +23,10 @@ local BUILTIN_GUILDS = { "Olympus" }
 -- Fewer reports put them under review: not blocked, but you get a warning when you meet them.
 local STRIKES = 3
 
+-- An avoided-guild claim from other players locks someone in only when this many different reporter
+-- codes make it. Otherwise it waits until you see the player yourself and the game shows their guild.
+local GUILD_CORROBORATION = 2
+
 ----------------------------------------------------------------------------------------------------
 -- Reporter code (anti-alt)
 ----------------------------------------------------------------------------------------------------
@@ -210,28 +214,46 @@ end
 -- Guild and strikes players are locked into db.locked[key] = { name, role, guild, reason, at }, so they
 -- stay avoided even if the reporters later take them off their lists.
 --
--- Returns info = { name, role, status, face, from, count, guild }, key; or nil, key.
+-- A sender's "they're in Olympus" claim is never trusted on its own (a modified addon could claim it
+-- for anyone). It counts only when GUILD_CORROBORATION different reporter codes make it, and only
+-- until you see the player yourself: then their real guild decides (see SMA:CheckUnitGuild).
+-- db.guildSeen[key] = guildName records players you've seen who are NOT in an avoided guild.
+--
+-- Returns info = { name, role, status, face, from, count, strikes, guild, claim }, key; or nil, key.
 function SMA:GetShared(name)
 	local key = Key(name)
 	if not key or db.dismissed[key] then return nil, key end
-	local found, from, count, guild = nil, nil, 0, nil
+	local found, from, count = nil, nil, 0
 	local codes, strikes = {}, 0
+	local claimCodes, claims, claimGuild = {}, 0, nil
 	for _, box in pairs(db.inbox) do
 		local e = box.entries[key]
 		if e then
 			count = count + 1
 			if not found then found, from = e, box.from end
-			if not guild and MatchGuildRule(e.guild) then guild = e.guild end
 			-- a strike per reporter code: alts of one person count once, lists without a code never count
 			if box.code and not codes[box.code] then
 				codes[box.code] = true
 				strikes = strikes + 1
 			end
+			if MatchGuildRule(e.guild) then
+				claimGuild = claimGuild or e.guild
+				if box.code and not claimCodes[box.code] then
+					claimCodes[box.code] = true
+					claims = claims + 1
+				end
+			end
 		end
 	end
 	local locked = db.locked[key]
 	if not found and not locked then return nil, key end
-	guild = guild or (locked and locked.guild)
+	if db.guildSeen[key] then claimGuild, claims = nil, 0 end -- you've seen them yourself: not in it
+	local guild
+	if claims >= GUILD_CORROBORATION then
+		guild = claimGuild
+	elseif locked and locked.reason == "guild" then
+		guild = locked.guild
+	end
 	local status
 	if guild then
 		status = "guild"
@@ -249,7 +271,8 @@ function SMA:GetShared(name)
 		from = from,
 		count = count,     -- characters that reported them
 		strikes = strikes, -- different reporter codes among them
-		guild = guild,
+		guild = guild,     -- avoided guild, confirmed by corroboration or a lock
+		claim = not guild and claimGuild or nil, -- an unconfirmed avoided-guild claim
 	}, key
 end
 
@@ -396,7 +419,11 @@ function SMA:Load(name, guid)
 		elseif shared.status == "strikes" then
 			text = "Reported by " .. STRIKES .. "+ players: avoided."
 		else
-			text = "Under review: " .. shared.strikes .. " of " .. STRIKES .. " strikes. Pick a face and Save to decide yourself."
+			text = "Under review: " .. shared.strikes .. " of " .. STRIKES .. " strikes."
+			if shared.claim then
+				text = text .. " Said to be in <" .. Escape(shared.claim) .. ">, unconfirmed until you see them."
+			end
+			text = text .. " Pick a face and Save to decide yourself."
 		end
 		f.sourceText:SetText(text)
 	else
@@ -551,6 +578,7 @@ function SMA:Refresh()
 			source = STRIKES .. " strikes"
 		else
 			source = "review " .. info.strikes .. "/" .. STRIKES
+			if info.claim then source = source .. ", <" .. info.claim .. ">?" end
 		end
 		list[#list + 1] = { key = key, name = info.name, face = info.face, role = info.role, from = source }
 	end
@@ -970,7 +998,8 @@ function SMA:WarnReview(name, guid)
 	end
 	if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
 	Print(FaceText(FACE_REVIEW) .. " " .. who .. " is under review (" .. info.strikes .. " of " .. STRIKES
-		.. " strikes). Previous poor behaviour reported, proceed with care.")
+		.. " strikes" .. (info.claim and (", said to be in <" .. Escape(info.claim) .. ">, unconfirmed") or "")
+		.. "). Previous poor behaviour reported, proceed with care.")
 end
 
 -- Wrap the outgoing invite functions so :( players are never invited (menus, /invite, friends list).
@@ -1085,6 +1114,27 @@ end
 -- The game only tells us someone's guild for a unit (target, mouseover, group member, nameplate),
 -- so players are picked up when you see them that way, not from chat names or invites alone.
 
+-- You've seen a player in a guild that isn't avoided. If others claimed they were in one, the claim
+-- is wrong (or out of date): drop it, and undo a guild lock that came from it.
+function SMA:NoteNotInAvoidedGuild(key, display, guildName)
+	if db.guildSeen[key] == guildName then return end
+	local locked = db.locked[key]
+	local hasClaim = locked ~= nil and locked.reason == "guild"
+	if not hasClaim then
+		for _, box in pairs(db.inbox) do
+			local e = box.entries[key]
+			if e and MatchGuildRule(e.guild) then hasClaim = true break end
+		end
+	end
+	if not hasClaim then return end
+	db.guildSeen[key] = guildName
+	if locked and locked.reason == "guild" then db.locked[key] = nil end
+	Print(FaceText(FACE_REVIEW) .. " " .. Escape(display) .. " is in <" .. Escape(guildName)
+		.. ">, not an avoided guild, so the guild claim about them was ignored.")
+	self:ApplyLocks() -- they may still have enough strikes
+	if frame and frame:IsShown() then self:Refresh() end
+end
+
 function SMA:CheckUnitGuild(unit)
 	if not db then return end
 	local name = NameFromUnit(unit)
@@ -1099,6 +1149,11 @@ function SMA:CheckUnitGuild(unit)
 		own.guild = guildName -- remembered so it goes out with your shared :( entries
 		return
 	end
+	if not MatchGuildRule(guildName) then
+		self:NoteNotInAvoidedGuild(key, display, guildName)
+		return
+	end
+	db.guildSeen[key] = nil
 	if db.autoSkip[key] then return end
 	local myGuild = GetGuildInfo("player")
 	if Accessible(myGuild) and myGuild == guildName then return end -- never your own guild mates
@@ -1594,6 +1649,14 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db.avoidGuilds = db.avoidGuilds or {}
 		db.autoSkip = db.autoSkip or {}
 		db.locked = db.locked or {}
+		db.guildSeen = db.guildSeen or {}
+		if (db.schema or 1) < 2 then
+			-- 1.5 locked a player on a single sender's guild claim; re-check those under the new rules
+			for key, l in pairs(db.locked) do
+				if l.reason == "guild" then db.locked[key] = nil end
+			end
+			db.schema = 2
+		end
 		for i = #db.avoidGuilds, 1, -1 do -- built-in rules don't need a personal copy
 			for _, b in ipairs(BUILTIN_GUILDS) do
 				if strlower(db.avoidGuilds[i]) == strlower(b) then table.remove(db.avoidGuilds, i) break end

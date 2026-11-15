@@ -2,7 +2,7 @@
 ## Title: SnogMarryAvoid
 ## Notes: Tag players with a face, role and note. Blocks invites to and from :( players.
 ## Author: icouldonlygetthisname
-## Version: 1.6.0
+## Version: 1.7.0
 ## SavedVariables: SnogMarryAvoidDB
 ## IconTexture: Interface\AddOns\SnogMarryAvoid\Media\happy
 ## AddonCompartmentFunc: SnogMarryAvoid_OnAddonCompartmentClick
