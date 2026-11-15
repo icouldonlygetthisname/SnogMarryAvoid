@@ -297,6 +297,7 @@ function SMA:Save()
 		role = f.role,
 		note = strtrim(f.noteBox:GetText() or ""),
 		guid = f.guid or (old and old.guid) or nil,
+		auto = old and old.auto or nil,
 		updated = time(),
 	}
 	self:Load(name)
@@ -323,6 +324,7 @@ function SMA:QuickTag(name, guid, unit, face)
 		role = role,
 		note = old and old.note or "",
 		guid = (Accessible(guid) and guid) or (old and old.guid) or nil,
+		auto = old and old.auto or nil,
 		updated = time(),
 	}
 	Print(FaceText(face) .. " " .. Escape(display) .. (old and " updated." or " added."))
@@ -333,9 +335,16 @@ function SMA:QuickTag(name, guid, unit, face)
 	self:OnOwnListChanged()
 end
 
+-- Remove one of your own entries. An auto-added guild entry you delete isn't added again.
+local function RemoveOwn(key)
+	local e = db.players[key]
+	if e and e.auto then db.autoSkip[key] = true end
+	db.players[key] = nil
+end
+
 function SMA:Delete()
 	if frame.editKey then
-		db.players[frame.editKey] = nil
+		RemoveOwn(frame.editKey)
 		self:OnOwnListChanged()
 	elseif frame.sharedKey then
 		db.dismissed[frame.sharedKey] = true -- stays hidden even when the sender syncs again
@@ -349,7 +358,7 @@ function SMA:DeleteKeys(keys)
 	local ownChanged = false
 	for _, key in ipairs(keys) do
 		if db.players[key] then
-			db.players[key] = nil
+			RemoveOwn(key)
 			ownChanged = true
 		else
 			db.dismissed[key] = true
@@ -370,7 +379,7 @@ end
 
 -- Remove everything: your own entries and all received lists.
 function SMA:DeleteAll()
-	wipe(db.players)
+	for key in pairs(db.players) do RemoveOwn(key) end
 	wipe(db.inbox)
 	wipe(db.dismissed)
 	wipe(frame.checked)
@@ -861,6 +870,102 @@ local function OnTradeRequest(name)
 	Print(FaceText(FACE_AVOID) .. " Declined a trade from " .. Escape(DisplayName(name)) .. ".")
 end
 
+----------------------------------------------------------------------------------------------------
+-- Guild rules: players in a guild whose name starts with one of db.avoidGuilds are added as :(
+----------------------------------------------------------------------------------------------------
+-- The game only tells us someone's guild for a unit (target, mouseover, group member, nameplate),
+-- so players are picked up when you see them that way, not from chat names or invites alone.
+
+local function MatchGuildRule(guildName)
+	local lower = strlower(guildName)
+	for _, prefix in ipairs(db.avoidGuilds) do
+		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
+	end
+end
+
+function SMA:CheckUnitGuild(unit)
+	if not db or #db.avoidGuilds == 0 then return end
+	local name = NameFromUnit(unit)
+	if not name or IsMe(name) then return end
+	local display = DisplayName(name)
+	local key = display and Key(display)
+	if not key or db.players[key] or db.autoSkip[key] then return end
+	local guildName = GetGuildInfo(unit)
+	if not Accessible(guildName) or not guildName or guildName == "" then return end
+	local myGuild = GetGuildInfo("player")
+	if Accessible(myGuild) and myGuild == guildName then return end -- never your own guild mates
+	if not MatchGuildRule(guildName) then return end
+
+	local guid = UnitGUID(unit)
+	local role
+	if UnitGroupRolesAssigned then
+		local r = UnitGroupRolesAssigned(unit)
+		if Accessible(r) and ROLE_BY_KEY[r] then role = r end
+	end
+	db.dismissed[key] = nil
+	db.players[key] = {
+		name = display,
+		face = FACE_AVOID,
+		role = role,
+		note = "Auto: guild <" .. guildName .. ">",
+		guid = Accessible(guid) and guid or nil,
+		auto = guildName,
+		updated = time(),
+	}
+	Print(FaceText(FACE_AVOID) .. " Added " .. Escape(display) .. " (guild <" .. Escape(guildName) .. ">).")
+	if frame and frame:IsShown() then self:Refresh() end
+	self:OnOwnListChanged()
+end
+
+function SMA:CheckGroup()
+	if IsInRaid() then
+		for i = 1, GetNumGroupMembers() do self:CheckUnitGuild("raid" .. i) end
+	else
+		for i = 1, 4 do self:CheckUnitGuild("party" .. i) end
+	end
+end
+
+-- /sma avoidguild [add|remove] <prefix>
+function SMA:GuildRuleCommand(args)
+	local action, prefix = args:match("^(%S+)%s*(.-)%s*$")
+	if action ~= "add" and action ~= "remove" then
+		action, prefix = (args ~= "" and "add" or nil), strtrim(args)
+	end
+	if action == "add" and prefix ~= "" then
+		for _, p in ipairs(db.avoidGuilds) do
+			if strlower(p) == strlower(prefix) then Print("Already avoiding guilds starting with \"" .. p .. "\".") return end
+		end
+		table.insert(db.avoidGuilds, prefix)
+		Print("Guilds starting with \"" .. prefix .. "\" are now added as " .. FaceText(FACE_AVOID) .. " when you see their members.")
+		if UnitExists("target") then self:CheckUnitGuild("target") end
+		self:CheckGroup()
+	elseif action == "remove" and prefix ~= "" then
+		local removed
+		for i, p in ipairs(db.avoidGuilds) do
+			if strlower(p) == strlower(prefix) then removed = table.remove(db.avoidGuilds, i) break end
+		end
+		if not removed then Print("No guild rule for \"" .. prefix .. "\".") return end
+		-- drop the untouched :( entries that rule added
+		local n = 0
+		for key, e in pairs(db.players) do
+			if e.auto and e.face == FACE_AVOID and not MatchGuildRule(e.auto)
+				and strlower(e.auto):sub(1, #removed) == strlower(removed) then
+				db.players[key] = nil
+				n = n + 1
+			end
+		end
+		Print("Removed the guild rule \"" .. removed .. "\" and " .. n .. " players it added.")
+		if frame and frame:IsShown() then self:Refresh() end
+		if n > 0 then self:OnOwnListChanged() end
+	else
+		if #db.avoidGuilds == 0 then
+			Print("No guild rules. Add one with /sma avoidguild <start of guild name>.")
+		else
+			Print("Auto-avoiding guilds starting with: " .. table.concat(db.avoidGuilds, ", "))
+		end
+	end
+end
+
 function SMA:SetIgnore(on)
 	db.ignore = on and true or false
 	lastAuthor = nil
@@ -1234,6 +1339,8 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db.inbox = db.inbox or {}
 		db.dismissed = db.dismissed or {}
 		if db.ignore == nil then db.ignore = true end
+		db.avoidGuilds = db.avoidGuilds or {}
+		db.autoSkip = db.autoSkip or {}
 		if db.shared then -- 1.0 dev builds kept one flat table of shared entries
 			for key, s in pairs(db.shared) do
 				local senderKey = Key(s.from) or "?"
@@ -1255,6 +1362,14 @@ events:SetScript("OnEvent", function(self, event, ...)
 		self:UnregisterEvent("ADDON_LOADED")
 	elseif event == "PARTY_INVITE_REQUEST" then
 		if db then OnPartyInviteRequest(...) end
+	elseif event == "PLAYER_TARGET_CHANGED" then
+		SMA:CheckUnitGuild("target")
+	elseif event == "UPDATE_MOUSEOVER_UNIT" then
+		SMA:CheckUnitGuild("mouseover")
+	elseif event == "NAME_PLATE_UNIT_ADDED" then
+		SMA:CheckUnitGuild((...))
+	elseif event == "GROUP_ROSTER_UPDATE" then
+		if db and #db.avoidGuilds > 0 then SMA:CheckGroup() end
 	elseif event == "DUEL_REQUESTED" then
 		if db then OnDuelRequested(...) end
 	elseif event == "TRADE_REQUEST" then
@@ -1272,6 +1387,10 @@ events:RegisterEvent("CHAT_MSG_ADDON")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("DUEL_REQUESTED")
 events:RegisterEvent("TRADE_REQUEST")
+events:RegisterEvent("PLAYER_TARGET_CHANGED")
+events:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+events:RegisterEvent("GROUP_ROSTER_UPDATE")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"
@@ -1287,6 +1406,8 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		SMA:SetGuildShare(not db.guildShare)
 	elseif msg == "ignore" then
 		SMA:SetIgnore(not db.ignore)
+	elseif msg == "avoidguild" or msg:find("^avoidguild ") then
+		SMA:GuildRuleCommand(strtrim(msg:sub(11)))
 	elseif msg == "share" or msg:find("^share ") then
 		local target = strtrim(msg:sub(6))
 		if target == "" then target = NameFromUnit("target") or "" end

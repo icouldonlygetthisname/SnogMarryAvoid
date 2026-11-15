@@ -29,6 +29,8 @@ To share lists, both players need the addon (see [Sharing](#sharing--lists)).
 
 - **Ignore (on by default):** their chat is hidden (say, yell, emotes, whispers, channels, party, raid, instance, guild and officer chat), and their duel and trade requests are declined. This is done by the addon, not the game's ignore list, so there's no limit on how many players you can ignore. It only affects you; the other player isn't told. Turn it off with the **Ignore :(** checkbox or `/sma ignore` (invites stay blocked either way).
 
+- **Guild rules:** `/sma avoidguild Olympus` adds anyone in a guild whose name starts with "Olympus" (case-insensitive) as :(, with the note "Auto: guild <name>". The game only reveals a player's guild for a unit, so they're picked up when you target or mouse over them, see their nameplate, or group with them, not from a chat name or invite alone. Your own guild mates are never added. An auto-added player you delete or re-tag isn't added again. `/sma avoidguild` lists the rules; `/sma avoidguild remove Olympus` removes the rule and the auto-added entries you haven't changed.
+
 **Caveat: Battle.net friends can't be blocked or ignored.** If a :( player is on your Battle.net friends list, invites in both directions go through as normal, and the window shows a red warning next to the faces. A friend is recognised by GUID, or by character name while they're online. An offline Battle.net friend tagged only by name can't be matched, but they also can't invite you while offline.
 
 ## Sharing :( lists
@@ -66,10 +68,11 @@ Forever uses regional unique names ("First Surname", no realm). Blizzard sometim
 ## Data
 
 `SnogMarryAvoidDB.players` (account-wide SavedVariables), keyed by lowercased name:
-`{ name, face = 1|2|3, role = "TANK"|"HEALER"|"DAMAGER"|nil, note, guid, updated }`.
+`{ name, face = 1|2|3, role = "TANK"|"HEALER"|"DAMAGER"|nil, note, guid, auto = guildName|nil, updated }`.
 
 - `inbox[senderKey] = { from, via = "direct"|"guild", updated, entries = { [playerKey] = { name, role } } }`: lists received from others (no notes).
 - `dismissed[playerKey] = true`: received entries you deleted.
+- `avoidGuilds`: guild name prefixes to auto-avoid. `autoSkip[playerKey]`: auto-added players you deleted.
 - `guildShare`: guild opt-in. `ignore`: hide chat and decline duels/trades from :( players (default on). `minimap = { angle, hide }`.
 
 ## Face icons
