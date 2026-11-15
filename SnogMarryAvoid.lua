@@ -23,6 +23,40 @@ local BUILTIN_GUILDS = { "Olympus" }
 -- Fewer reports put them under review: not blocked, but you get a warning when you meet them.
 local STRIKES = 3
 
+----------------------------------------------------------------------------------------------------
+-- Reporter code (anti-alt)
+----------------------------------------------------------------------------------------------------
+-- Strikes count different reporters, and alts of one person must count once. Each list is sent
+-- with a reporter code worked out from the sender's BattleTag at the moment of sending:
+--   * It's a number from 0 to REPORTER_CODES-1. Millions of BattleTags share every value, so the
+--     code holds far too little information to lead back to a BattleTag, or to confirm a guess.
+--   * The BattleTag is only read into a local variable here. It's never saved, sent or printed,
+--     and the code itself isn't saved either; it's recalculated each time.
+--   * Being derived, not stored, the code can't be changed by editing SavedVariables. All WoW
+--     accounts and characters under one Battle.net account get the same code.
+-- Two different people sometimes share a code (about 1 in 256 per pair). They then count as one
+-- strike, which only ever makes a lock slower, never wrongly faster.
+local REPORTER_CODES = 256
+local REPORTER_SALT = "SnogMarryAvoid reporter v1:"
+
+local function ReporterCode()
+	if not BNGetInfo then return nil end
+	local _, battleTag = BNGetInfo()
+	if type(battleTag) ~= "string" or not (not canaccessvalue or canaccessvalue(battleTag)) or battleTag == "" then
+		return nil
+	end
+	-- FNV-style hash over the salted, lower-cased BattleTag, using arithmetic only (Lua 5.1).
+	-- h * 16777619 can reach 2^56, past exact double precision, so the multiply is split:
+	-- 16777619 = 256 * 65536 + 403.
+	local s = REPORTER_SALT .. strlower(battleTag)
+	local h = 2166136261
+	for i = 1, #s do
+		h = (h + s:byte(i)) % 4294967296
+		h = (h * 403 + ((h * 256) % 65536) * 65536) % 4294967296
+	end
+	return h % REPORTER_CODES
+end
+
 local ROLES = {
 	{ key = "TANK", label = "Tank", atlas = "roleicon-tiny-tank" },
 	{ key = "HEALER", label = "Healer", atlas = "roleicon-tiny-healer" },
@@ -181,12 +215,18 @@ function SMA:GetShared(name)
 	local key = Key(name)
 	if not key or db.dismissed[key] then return nil, key end
 	local found, from, count, guild = nil, nil, 0, nil
+	local codes, strikes = {}, 0
 	for _, box in pairs(db.inbox) do
 		local e = box.entries[key]
 		if e then
 			count = count + 1
 			if not found then found, from = e, box.from end
 			if not guild and MatchGuildRule(e.guild) then guild = e.guild end
+			-- a strike per reporter code: alts of one person count once, lists without a code never count
+			if box.code and not codes[box.code] then
+				codes[box.code] = true
+				strikes = strikes + 1
+			end
 		end
 	end
 	local locked = db.locked[key]
@@ -195,7 +235,7 @@ function SMA:GetShared(name)
 	local status
 	if guild then
 		status = "guild"
-	elseif locked or count >= STRIKES then
+	elseif locked or strikes >= STRIKES then
 		status = "strikes"
 	else
 		status = "review"
@@ -207,7 +247,8 @@ function SMA:GetShared(name)
 		status = status,
 		face = status == "review" and FACE_REVIEW or FACE_AVOID,
 		from = from,
-		count = count,
+		count = count,     -- characters that reported them
+		strikes = strikes, -- different reporter codes among them
 		guild = guild,
 	}, key
 end
@@ -226,7 +267,7 @@ function SMA:ApplyLocks(quiet)
 						if info.status == "guild" then
 							Print(FaceText(FACE_AVOID) .. " " .. Escape(info.name) .. " (guild <" .. Escape(info.guild) .. ">) is now avoided.")
 						else
-							Print(FaceText(FACE_AVOID) .. " " .. Escape(info.name) .. " was reported by " .. info.count .. " players and is now avoided.")
+							Print(FaceText(FACE_AVOID) .. " " .. Escape(info.name) .. " was reported by " .. info.strikes .. " different players and is now avoided.")
 						end
 					end
 				end
@@ -355,7 +396,7 @@ function SMA:Load(name, guid)
 		elseif shared.status == "strikes" then
 			text = "Reported by " .. STRIKES .. "+ players: avoided."
 		else
-			text = "Under review: reported by " .. shared.count .. " of " .. STRIKES .. ". Pick a face and Save to decide yourself."
+			text = "Under review: " .. shared.strikes .. " of " .. STRIKES .. " strikes. Pick a face and Save to decide yourself."
 		end
 		f.sourceText:SetText(text)
 	else
@@ -509,7 +550,7 @@ function SMA:Refresh()
 		elseif info.status == "strikes" then
 			source = STRIKES .. " strikes"
 		else
-			source = "review " .. info.count .. "/" .. STRIKES
+			source = "review " .. info.strikes .. "/" .. STRIKES
 		end
 		list[#list + 1] = { key = key, name = info.name, face = info.face, role = info.role, from = source }
 	end
@@ -928,8 +969,8 @@ function SMA:WarnReview(name, guid)
 		RaidNotice_AddMessage(RaidWarningFrame, text, ChatTypeInfo and ChatTypeInfo["RAID_WARNING"], 8)
 	end
 	if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
-	Print(FaceText(FACE_REVIEW) .. " " .. who .. " is under review (reported by " .. info.count .. " of " .. STRIKES
-		.. " players). Previous poor behaviour reported, proceed with care.")
+	Print(FaceText(FACE_REVIEW) .. " " .. who .. " is under review (" .. info.strikes .. " of " .. STRIKES
+		.. " strikes). Previous poor behaviour reported, proceed with care.")
 end
 
 -- Wrap the outgoing invite functions so :( players are never invited (menus, /invite, friends list).
@@ -1260,6 +1301,8 @@ local function SendList(target, via)
 	local list = OwnAvoidEntries()
 	local quiet = via == "guild"
 	Enqueue("BEGIN\t" .. via, target, quiet)
+	local code = ReporterCode()
+	if code then Enqueue("ID\t" .. code, target, quiet) end -- a separate message, so older versions ignore it
 	for _, entry in ipairs(list) do
 		-- Notes are private and never sent: they're personal opinions that could read as unfair to others.
 		-- The guild (prefixed "G:", so older versions that read a note field here can't confuse it)
@@ -1389,6 +1432,12 @@ local function OnAddonMessage(prefix, text, channel, sender)
 		if allowed then
 			transfers[senderKey] = { via = rest, entries = {}, count = 0, expires = now + OFFER_TTL }
 		end
+	elseif cmd == "ID" then
+		local t = transfers[senderKey]
+		local code = tonumber(rest)
+		if t and t.expires >= now and code and code >= 0 and code < REPORTER_CODES and code == math.floor(code) then
+			t.code = code
+		end
 	elseif cmd == "E" then
 		local t = transfers[senderKey]
 		if not t or t.expires < now or not rest or t.count >= MAX_ENTRIES then return end
@@ -1409,7 +1458,7 @@ local function OnAddonMessage(prefix, text, channel, sender)
 		transfers[senderKey] = nil
 		if t.via == "direct" then directAccepted[senderKey] = nil end
 		local previous = db.inbox[senderKey]
-		db.inbox[senderKey] = { from = DisplayName(sender), via = t.via, updated = time(), entries = t.entries }
+		db.inbox[senderKey] = { from = DisplayName(sender), via = t.via, code = t.code, updated = time(), entries = t.entries }
 		local who = Escape(DisplayName(sender))
 		if t.via == "direct" then
 			Print("Received " .. t.count .. " " .. FaceText(FACE_AVOID) .. " entries from " .. who .. ".")
