@@ -39,6 +39,8 @@ Once a player is on your avoid list:
 
 Players in any guild whose name starts with **Olympus** are added to everyone's avoid list as soon as you see them in game. Your own guild mates are never added. You can add your own guild rules with `/sma avoidguild <start of guild name>`.
 
+To find them before you meet them, press **Find Olympus** in the window or type `/sma who`. It searches /who for Olympus members who are online and adds them. If you have your own guild rules, each press searches the next one. /who lists at most 50 players per search. Any /who you run yourself is checked too.
+
 ## Sharing lists
 
 You can swap avoid lists with friends and guild mates who also use the addon. Sharing always needs both sides to agree.
@@ -79,6 +81,7 @@ The addon shows you this the first time you share and asks you to agree. Nothing
 | `/sma share [name]` | Offer to swap lists (your target if no name) |
 | `/sma guild` | Turn guild sharing on or off |
 | `/sma ignore` | Turn ignoring avoided players on or off |
+| `/sma who` | Search /who for Olympus (and your guild rules) and add who's online |
 | `/sma avoidguild [name]` | List your guild rules, or add one |
 | `/sma avoidguild remove <name>` | Remove one of your guild rules |
 | `/sma privacy` | Read the privacy notice again, or withdraw consent |
