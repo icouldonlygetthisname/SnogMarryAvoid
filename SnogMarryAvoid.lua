@@ -902,6 +902,18 @@ function SMA:GetFrame()
 	f.deleteAllButton:SetPoint("LEFT", f.deleteSelectedButton, "RIGHT", 6, 0)
 	f.deleteAllButton:SetScript("OnClick", function() StaticPopup_Show("SNOGMARRYAVOID_DELETE_ALL") end)
 
+	local who = MakeButton(f, "Find Olympus", 130)
+	who:SetPoint("BOTTOMRIGHT", -30, 12)
+	who:SetScript("OnClick", function() SMA:WhoSearch() end)
+	who:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Find Olympus")
+		GameTooltip:AddLine("Searches /who for players online in Olympus guilds (and your own guild rules, one per click) and adds them as :(.", 1, 1, 1, true)
+		GameTooltip:AddLine("/who shows at most 50 players per search.", 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	who:SetScript("OnLeave", GameTooltip_Hide)
+
 	local scrollBar = CreateFrame("EventFrame", nil, f, "MinimalScrollBar")
 	scrollBar:SetPoint("TOPLEFT", f.scrollBox, "TOPRIGHT", 6, 0)
 	scrollBar:SetPoint("BOTTOMLEFT", f.scrollBox, "BOTTOMRIGHT", 6, 0)
@@ -1158,12 +1170,19 @@ end
 function SMA:CheckUnitGuild(unit)
 	if not db then return end
 	local name = NameFromUnit(unit)
+	if not name then return end
+	self:CheckGuildMember(name, GetGuildInfo(unit), unit)
+end
+
+-- A player seen in a guild (from a unit, or a /who result when unit is nil). Adds them as :( if the
+-- guild matches a rule. quiet skips the per-player chat line and window refresh (the /who scan
+-- prints one summary). Returns true if they were added.
+function SMA:CheckGuildMember(name, guildName, unit, quiet)
 	if not name or IsMe(name) then return end
 	local display = DisplayName(name)
 	local key = display and Key(display)
 	if not key then return end
-	local guildName = GetGuildInfo(unit)
-	if not Accessible(guildName) or not guildName or guildName == "" then return end
+	if not Accessible(guildName) or type(guildName) ~= "string" or guildName == "" then return end
 	local firstKey = FirstNameKey(display)
 	local old = firstKey and firstKey ~= key and db.players[firstKey]
 	if old and old.auto and not db.players[key] and old.guild == guildName then
@@ -1188,11 +1207,13 @@ function SMA:CheckUnitGuild(unit)
 	if Accessible(myGuild) and myGuild == guildName then return end -- never your own guild mates
 	if not MatchGuildRule(guildName) then return end
 
-	local guid = UnitGUID(unit)
-	local role
-	if UnitGroupRolesAssigned then
-		local r = UnitGroupRolesAssigned(unit)
-		if Accessible(r) and ROLE_BY_KEY[r] then role = r end
+	local guid, role
+	if unit then
+		guid = UnitGUID(unit)
+		if UnitGroupRolesAssigned then
+			local r = UnitGroupRolesAssigned(unit)
+			if Accessible(r) and ROLE_BY_KEY[r] then role = r end
+		end
 	end
 	db.dismissed[key] = nil
 	db.players[key] = {
@@ -1205,9 +1226,78 @@ function SMA:CheckUnitGuild(unit)
 		guild = guildName,
 		updated = time(),
 	}
-	Print(FaceText(FACE_AVOID) .. " Added " .. Escape(display) .. " (guild <" .. Escape(guildName) .. ">).")
-	if frame and frame:IsShown() then self:Refresh() end
+	if not quiet then
+		Print(FaceText(FACE_AVOID) .. " Added " .. Escape(display) .. " (guild <" .. Escape(guildName) .. ">).")
+		if frame and frame:IsShown() then self:Refresh() end
+	end
 	self:OnOwnListChanged()
+	return true
+end
+
+-- /who ------------------------------------------------------------------------------------------
+-- C_FriendList.SendWho only works from a click or a typed command, so the addon can't search on
+-- its own. /sma who (or the window's button) searches for the next guild rule in turn; any /who
+-- results, including your own searches, are checked against the rules.
+
+local whoRuleIndex = 0
+local whoPending -- the rule we searched for, until its results arrive
+local whoWasToUi
+
+function SMA:WhoSearch()
+	if not (C_FriendList and C_FriendList.SendWho) then
+		Print("/who isn't available.")
+		return
+	end
+	local rules = {}
+	for _, p in ipairs(BUILTIN_GUILDS) do rules[#rules + 1] = p end
+	for _, p in ipairs(db.avoidGuilds) do rules[#rules + 1] = p end
+	whoRuleIndex = whoRuleIndex % #rules + 1
+	local rule = rules[whoRuleIndex]
+	whoPending = rule
+	-- send results to WHO_LIST_UPDATE instead of chat, then put the setting back
+	if C_FriendList.SetWhoToUi then
+		whoWasToUi = (WhoFrame and WhoFrame:IsShown()) == true
+		C_FriendList.SetWhoToUi(true)
+	end
+	local tag = (type(WHO_TAG_GUILD) == "string" and WHO_TAG_GUILD ~= "") and WHO_TAG_GUILD or "g-"
+	C_FriendList.SendWho(tag .. "\"" .. rule .. "\"", Enum.SocialWhoOrigin and Enum.SocialWhoOrigin.Social)
+	C_Timer.After(15, function()
+		-- no results (the server throttles /who): put the setting back anyway
+		if whoPending == rule then
+			whoPending = nil
+			if C_FriendList.SetWhoToUi and whoWasToUi ~= nil then C_FriendList.SetWhoToUi(whoWasToUi) end
+			Print("/who didn't answer. Wait a few seconds and try again.")
+		end
+	end)
+	Print("Searching /who for guilds starting with \"" .. Escape(rule) .. "\"..."
+		.. (#rules > 1 and " Search again for the next guild rule." or ""))
+end
+
+function SMA:OnWhoListUpdate()
+	if not (C_FriendList and C_FriendList.GetNumWhoResults and C_FriendList.GetWhoInfo) then return end
+	local num, total = C_FriendList.GetNumWhoResults()
+	local added, found = 0, 0
+	for i = 1, num or 0 do
+		local info = C_FriendList.GetWhoInfo(i)
+		if info and Accessible(info.fullName) and Accessible(info.fullGuildName) then
+			if MatchGuildRule(info.fullGuildName) and not IsMe(info.fullName) then found = found + 1 end
+			if self:CheckGuildMember(info.fullName, info.fullGuildName, nil, true) then added = added + 1 end
+		end
+	end
+	if added > 0 and frame and frame:IsShown() then self:Refresh() end
+	if whoPending then
+		local rule = whoPending
+		whoPending = nil
+		if C_FriendList.SetWhoToUi and whoWasToUi ~= nil then C_FriendList.SetWhoToUi(whoWasToUi) end
+		local msg = "/who \"" .. Escape(rule) .. "\": " .. found .. " online in avoided guilds, "
+			.. added .. " new added as " .. FaceText(FACE_AVOID) .. "."
+		if total and num and total > num then
+			msg = msg .. " /who shows at most " .. num .. " of " .. total .. ", so some were missed."
+		end
+		Print(msg)
+	elseif added > 0 then
+		Print(FaceText(FACE_AVOID) .. " Added " .. added .. " players in avoided guilds from /who.")
+	end
 end
 
 -- Players already warned about in the current group, so a roster update doesn't repeat it.
@@ -1884,6 +1974,8 @@ events:SetScript("OnEvent", function(self, event, ...)
 		if db then OnDuelRequested(...) end
 	elseif event == "TRADE_REQUEST" then
 		if db then OnTradeRequest(...) end
+	elseif event == "WHO_LIST_UPDATE" then
+		if db then SMA:OnWhoListUpdate() end
 	elseif event == "CHAT_MSG_ADDON" then
 		if db then OnAddonMessage(...) end
 	elseif event == "PLAYER_ENTERING_WORLD" then
@@ -1907,6 +1999,7 @@ events:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
 events:RegisterEvent("GROUP_ROSTER_UPDATE")
 events:RegisterEvent("CHAT_MSG_WHISPER")
+events:RegisterEvent("WHO_LIST_UPDATE")
 
 SLASH_SNOGMARRYAVOID1 = "/sma"
 SLASH_SNOGMARRYAVOID2 = "/snogmarryavoid"
@@ -1924,6 +2017,8 @@ SlashCmdList.SNOGMARRYAVOID = function(msg)
 		SMA:SetGuildShare(not db.guildShare)
 	elseif msg == "ignore" then
 		SMA:SetIgnore(not db.ignore)
+	elseif msg == "who" then
+		SMA:WhoSearch()
 	elseif msg == "avoidguild" or msg:find("^avoidguild ") then
 		SMA:GuildRuleCommand(strtrim(msg:sub(11)))
 	elseif msg == "share" or msg:find("^share ") then
