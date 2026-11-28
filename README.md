@@ -23,21 +23,31 @@ When a guild mate or someone in your group has a newer version, the addon tells 
 
 - **Right-click a player** (a chat name, party or raid frame, target, friends list or guild roster) and hover over **SnogMarryAvoid**. Pick a face to tag them in one click. Choose **Add with note and role...** to open the window with them filled in.
 - **Open the window** with the minimap button, the addon compartment, or `/sma`. You can add a player by typing their name, too.
+- **Tabs** under the window split the list into happy, meh and avoided players, with avoided guild members (Olympus, and your own guild rules) on a tab of their own. Under-review players are on the avoid tab, below the rest. When you open a player, the window switches to their tab.
 - **Edit** a player by clicking them in the list. Change the face, role or note and press **Save**.
-- **Delete** players with **Delete** in the editor, or tick several and use **Delete selected**. **Delete all** clears everything.
+- **Delete** players with **Delete** in the editor, or tick several and use **Delete selected**. Ticks and **Select all** only cover the tab you're on. **Delete all** clears everything, on every tab.
 
 ## Avoided players
 
 Once a player is on your avoid list:
 
-- **Invites are blocked both ways.** You can't invite them by accident, and their group invites are declined automatically.
+- **Invites are blocked both ways.** You can't invite them by accident, and their group and guild invites are declined automatically. Guild invites into an avoided guild (Olympus, or one of your own rules) are declined too, whoever sends them.
+- **You can spot them.** A red face shows next to their name on nameplates (an orange one for players under review). Their tooltip says why they're avoided. Every player you've tagged gets a tooltip line with their face and your note.
 - **They're ignored.** Their chat and whispers are hidden, and their duel and trade requests are declined. This is separate from the game's ignore list, so there's no limit on how many players you can ignore. They aren't told. Turn it off with the **Ignore** checkbox or `/sma ignore`. Invites stay blocked either way.
 
 **Battle.net friends are never blocked or ignored**, even if they're on your avoid list. The window warns you when that's the case.
 
 ## Olympus
 
-Players in any guild whose name starts with **Olympus** are added to everyone's avoid list as soon as you see them in game. Your own guild mates are never added. You can add your own guild rules with `/sma avoidguild <start of guild name>`.
+Players in any guild with **Olympus** anywhere in its name (Olympus II, The Olympus Crew, and so on) are added to everyone's avoid list as soon as you see them in game. Your own guild mates are never added. You can add your own guild rules, matched three ways:
+
+| Command | Avoids |
+| --- | --- |
+| `/sma avoidguild Knights` | Guilds whose name **starts with** "Knights" (Knights I, Knights II...) |
+| `/sma avoidguild contains Knights` | Guilds with "Knights" **anywhere** in the name (The Knights, Knights II...) |
+| `/sma avoidguild exact Knights` | Only the guild called exactly "Knights" |
+
+Upper and lower case don't matter. Adding a rule again with a different match changes it.
 
 To find them before you meet them, press **Find Olympus** in the window or type `/sma who`. It searches /who for Olympus members who are online and adds them. If you have your own guild rules, each press searches the next one. /who lists at most 50 players per search. Any /who you run yourself is checked too.
 
@@ -82,7 +92,7 @@ The addon shows you this the first time you share and asks you to agree. Nothing
 | `/sma guild` | Turn guild sharing on or off |
 | `/sma ignore` | Turn ignoring avoided players on or off |
 | `/sma who` | Search /who for Olympus (and your guild rules) and add who's online |
-| `/sma avoidguild [name]` | List your guild rules, or add one |
+| `/sma avoidguild [contains\|exact] [name]` | List your guild rules, or add one (starts with, unless you say `contains` or `exact`) |
 | `/sma avoidguild remove <name>` | Remove one of your guild rules |
 | `/sma privacy` | Read the privacy notice again, or withdraw consent |
 | `/sma minimap` | Show or hide the minimap button |

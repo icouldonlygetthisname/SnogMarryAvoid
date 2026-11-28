@@ -18,6 +18,7 @@ local NUM_PICKABLE = 3
 
 -- Guilds whose members are avoided by everyone using the addon (on top of your own /sma avoidguild rules).
 local BUILTIN_GUILDS = { "Olympus" }
+local BUILTIN_MODE = "contains" -- any guild with "Olympus" anywhere in its name
 
 -- A shared :( report from this many different players locks a non-guild player in as avoided.
 -- Fewer reports put them under review: not blocked, but you get a warning when you meet them.
@@ -211,15 +212,35 @@ function SMA:GetByGUID(guid)
 	end
 end
 
+-- Your own guild rules match the start of a guild name unless db.guildMatch[lowercase rule] says
+-- "contains" or "exact". Built-in rules always match the start.
+local MATCH_MODES = { start = "starting with", contains = "containing", exact = "named" }
+
+local function RuleMode(rule)
+	return db.guildMatch[strlower(rule)] or "start"
+end
+
+local function RuleMatches(rule, mode, lowerGuild)
+	local r = strlower(rule)
+	if mode == "exact" then return lowerGuild == r end
+	if mode == "contains" then return lowerGuild:find(r, 1, true) ~= nil end
+	return lowerGuild:sub(1, #r) == r
+end
+
+-- A rule as text, e.g. guilds starting with "Olympus".
+local function RuleText(rule, mode)
+	return "guilds " .. MATCH_MODES[mode or "start"] .. " \"" .. rule .. "\""
+end
+
 -- Returns the rule that matches a guild name (built-in or your own), or nil.
 local function MatchGuildRule(guildName)
 	if type(guildName) ~= "string" or guildName == "" then return nil end
 	local lower = strlower(guildName)
-	for _, prefix in ipairs(BUILTIN_GUILDS) do
-		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
+	for _, rule in ipairs(BUILTIN_GUILDS) do
+		if RuleMatches(rule, BUILTIN_MODE, lower) then return rule end
 	end
-	for _, prefix in ipairs(db.avoidGuilds) do
-		if lower:sub(1, #prefix) == strlower(prefix) then return prefix end
+	for _, rule in ipairs(db.avoidGuilds) do
+		if RuleMatches(rule, RuleMode(rule), lower) then return rule end
 	end
 end
 
@@ -317,6 +338,7 @@ function SMA:ApplyLocks(quiet)
 			end
 		end
 	end
+	if not quiet then self:RefreshPlates() end
 end
 
 -- Your own entry decides if you have one; otherwise a shared entry counts unless it's under review.
@@ -415,6 +437,35 @@ function SMA:SetRole(role)
 	UpdateToggleButtons(frame.roleButtons, role or "NONE")
 end
 
+-- The list has one tab per pickable face, plus one for players avoided because of their guild.
+-- Under-review players go on the :( tab.
+local TAB_GUILD = NUM_PICKABLE + 1
+local NUM_TABS = TAB_GUILD
+
+local function TabOf(face, inGuild)
+	if inGuild and face == FACE_AVOID then return TAB_GUILD end
+	return face == FACE_REVIEW and FACE_AVOID or face
+end
+
+-- Tab text: a face, a label and (once counted) how many players are on it.
+local function TabText(tab, count)
+	local label
+	if tab == TAB_GUILD then
+		-- name it after Olympus unless you've added guild rules of your own
+		label = #db.avoidGuilds == 0 and BUILTIN_GUILDS[1] or "Guilds"
+	else
+		label = FACES[tab].label
+	end
+	return FaceText(tab == TAB_GUILD and FACE_AVOID or tab, 16) .. " " .. label .. (count and (" (" .. count .. ")") or "")
+end
+
+-- Switch tab. Callers refresh the list afterwards.
+function SMA:SetTab(tab)
+	frame.tab = tab
+	db.tab = tab
+	PanelTemplates_SetTab(frame, tab)
+end
+
 -- Fill the editor with a player (existing entry or a new one).
 function SMA:Load(name, guid)
 	local f = self:GetFrame()
@@ -425,6 +476,10 @@ function SMA:Load(name, guid)
 	f.sharedKey = shared and key or nil
 	f.guid = guid or (entry and entry.guid) or nil
 	local source = entry or shared
+	if source and FACES[source.face] then -- show the player's tab
+		local inGuild = (entry and entry.auto ~= nil) or (shared and shared.status == "guild")
+		self:SetTab(TabOf(source.face, inGuild))
+	end
 	f.nameBox:SetText(source and source.name or DisplayName(name) or "")
 	f.noteBox:SetText(entry and entry.note or "")
 	self:SetFace(entry and entry.face or (shared and shared.face) or 1)
@@ -583,7 +638,8 @@ function SMA:Refresh()
 	if not frame then return end
 	local list = {}
 	for key, entry in pairs(db.players) do
-		list[#list + 1] = { key = key, name = entry.name, face = entry.face, role = entry.role, note = entry.note }
+		list[#list + 1] = { key = key, name = entry.name, face = entry.face, role = entry.role, note = entry.note,
+			inGuild = entry.auto ~= nil }
 	end
 	local seen = {}
 	local function AddShared(key)
@@ -600,12 +656,27 @@ function SMA:Refresh()
 			source = "review " .. info.strikes .. "/" .. STRIKES
 			if info.claim then source = source .. ", <" .. info.claim .. ">?" end
 		end
-		list[#list + 1] = { key = key, name = info.name, face = info.face, role = info.role, from = source }
+		list[#list + 1] = { key = key, name = info.name, face = info.face, role = info.role, from = source,
+			inGuild = info.status == "guild" }
 	end
 	for _, box in pairs(db.inbox) do
 		for key in pairs(box.entries) do AddShared(key) end
 	end
 	for key in pairs(db.locked) do AddShared(key) end
+	-- count every tab, then keep only the current one
+	local tabCounts = {}
+	for i = 1, NUM_TABS do tabCounts[i] = 0 end
+	local all = list
+	list = {}
+	for _, item in ipairs(all) do
+		local tab = TabOf(item.face, item.inGuild)
+		if tabCounts[tab] then tabCounts[tab] = tabCounts[tab] + 1 end
+		if tab == frame.tab then list[#list + 1] = item end
+	end
+	for i, tabButton in ipairs(frame.Tabs) do
+		tabButton:SetText(TabText(i, tabCounts[i]))
+		PanelTemplates_TabResize(tabButton, 0)
+	end
 	table.sort(list, function(a, b)
 		if a.face ~= b.face then return a.face < b.face end
 		return strlower(a.name) < strlower(b.name)
@@ -626,9 +697,14 @@ function SMA:Refresh()
 		if not present[key] then frame.checked[key] = nil end
 	end
 	frame.listCount = count
-	frame.scrollBox:SetDataProvider(CreateDataProvider(list), ScrollBoxConstants.RetainScrollPosition)
+	-- a different tab starts at the top
+	local keepScroll = frame.listTab == frame.tab
+	frame.listTab = frame.tab
+	frame.scrollBox:SetDataProvider(CreateDataProvider(list),
+		keepScroll and ScrollBoxConstants.RetainScrollPosition or ScrollBoxConstants.DiscardScrollPosition)
 	frame.countText:SetText(count .. " players")
-	frame.deleteAllButton:SetEnabled(count > 0)
+	frame.deleteAllButton:SetEnabled(#all > 0)
+	self:RefreshPlates()
 	self:UpdateSelectionButtons()
 end
 
@@ -923,6 +999,21 @@ function SMA:GetFrame()
 	view:SetElementInitializer("Button", InitRow)
 	ScrollUtil.InitScrollBoxListWithScrollBar(f.scrollBox, scrollBar, view)
 
+	-- Tabs under the window: one per face, then avoided guilds
+	for i = 1, NUM_TABS do
+		local tab = CreateFrame("Button", nil, f, "PanelTabButtonTemplate") -- adds itself to f.Tabs
+		tab:SetID(i)
+		tab:SetText(TabText(i))
+		tab:SetScript("OnClick", function()
+			PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB)
+			SMA:SetTab(i)
+			SMA:Refresh()
+		end)
+	end
+	f.Tabs[1]:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 12, 2)
+	PanelTemplates_SetNumTabs(f, NUM_TABS)
+	SMA:SetTab(type(db.tab) == "number" and db.tab >= 1 and db.tab <= NUM_TABS and db.tab or 1)
+
 	f:SetScript("OnShow", function() SMA:Refresh() end)
 
 	SMA:Load(nil)
@@ -1140,6 +1231,119 @@ local function OnTradeRequest(name)
 	Print(FaceText(FACE_AVOID) .. " Declined a trade from " .. Escape(DisplayName(name)) .. ".")
 end
 
+-- Guild invites from :( players, and invites into an avoided guild (Olympus or your own rules), are
+-- declined like group invites. A Battle.net friend's invite is only declined if it's into an avoided guild.
+local function HideGuildInvite()
+	-- hiding Blizzard's invite window declines the invite (its OnHide calls DeclineGuild)
+	if GuildInviteFrame and GuildInviteFrame:IsShown() then StaticPopupSpecial_Hide(GuildInviteFrame) end
+end
+
+local function OnGuildInviteRequest(inviter, guildName)
+	if not Accessible(inviter) then inviter = nil end
+	if not Accessible(guildName) or type(guildName) ~= "string" then guildName = nil end
+	local intoAvoided = guildName and MatchGuildRule(guildName)
+	local fromAvoided = inviter and SMA:IsAvoided(inviter) and not SMA:IsBNetFriend(inviter)
+	if not (intoAvoided or fromAvoided) then return end
+	DeclineGuild()
+	HideGuildInvite()
+	C_Timer.After(0, HideGuildInvite) -- in case Blizzard's handler runs after ours
+	Print(FaceText(FACE_AVOID) .. " Declined a guild invite" .. (guildName and (" to <" .. Escape(guildName) .. ">") or "")
+		.. " from " .. (inviter and Escape(DisplayName(inviter)) or "an avoided player") .. ".")
+end
+
+----------------------------------------------------------------------------------------------------
+-- Markers: a face on nameplates and a line in the unit tooltip
+----------------------------------------------------------------------------------------------------
+
+local FACE_COLORS = {
+	{ 0.3, 1, 0.3 },   -- happy
+	{ 1, 0.85, 0.2 },  -- meh
+	{ 1, 0.25, 0.25 }, -- avoid
+	{ 1, 0.6, 0.1 },   -- review
+}
+
+-- How you've tagged a unit: face, own entry or nil, shared info or nil. nil if untagged or unreadable
+-- (unit names are secret in instances).
+function SMA:UnitFace(unit)
+	if not db then return nil end
+	local name = NameFromUnit(unit)
+	if not name or IsMe(name) then return nil end
+	local guid = UnitGUID(unit)
+	if not Accessible(guid) then guid = nil end
+	local entry = self:Get(name) or self:GetByGUID(guid)
+	if entry then return entry.face, entry, nil end
+	local info = self:GetShared(name)
+	if info then return info.face, nil, info end
+end
+
+-- Nameplates show :( and under-review players only, so the screen doesn't fill with smiles.
+local plateMarkers = setmetatable({}, { __mode = "k" }) -- [nameplate] = marker frame
+
+function SMA:UpdatePlate(unit)
+	local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+	if not ok or not plate then return end -- no plate, or a protected one (some instances)
+	local face = self:UnitFace(unit)
+	local marker = plateMarkers[plate]
+	if face ~= FACE_AVOID and face ~= FACE_REVIEW then
+		if marker then marker:Hide() end
+		return
+	end
+	if not marker then
+		marker = CreateFrame("Frame", nil, plate)
+		marker:SetSize(18, 18)
+		marker.icon = marker:CreateTexture(nil, "OVERLAY")
+		marker.icon:SetAllPoints()
+		plateMarkers[plate] = marker
+	end
+	marker:SetFrameLevel(plate:GetFrameLevel() + 10)
+	-- the unit frame on a plate is pooled, so anchor again each time
+	local uf = plate.UnitFrame
+	local anchor = uf and ((uf.name and uf.name:IsShown() and uf.name) or uf.HealthBarsContainer or uf) or plate
+	marker:ClearAllPoints()
+	marker:SetPoint("RIGHT", anchor, "LEFT", -2, 0)
+	marker.icon:SetTexture(FACES[face].icon)
+	marker:Show()
+end
+
+function SMA:HidePlate(unit)
+	local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+	if ok and plate and plateMarkers[plate] then plateMarkers[plate]:Hide() end
+end
+
+function SMA:RefreshPlates()
+	if not (C_NamePlate and C_NamePlate.GetNamePlates) then return end
+	for _, plate in ipairs(C_NamePlate.GetNamePlates()) do
+		local unit = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
+		if unit then self:UpdatePlate(unit) elseif plateMarkers[plate] then plateMarkers[plate]:Hide() end
+	end
+end
+
+-- Every tagged player gets a tooltip line, with your note if you wrote one.
+local function OnTooltipUnit(tooltip)
+	if tooltip ~= GameTooltip or not db then return end
+	local ok, _, unit = pcall(tooltip.GetUnit, tooltip)
+	if not ok or not unit or not Accessible(unit) then return end
+	local face, entry, info = SMA:UnitFace(unit)
+	if not FACES[face] then return end
+	local text
+	if info and info.status == "guild" then
+		text = "Avoid: guild <" .. Escape(info.guild) .. ">"
+	elseif info and info.status == "strikes" then
+		text = "Avoid: reported by " .. STRIKES .. "+ players"
+	elseif info then
+		text = "Under review: " .. info.strikes .. " of " .. STRIKES .. " strikes, proceed with care"
+	elseif entry and face == FACE_AVOID and entry.auto then
+		text = "Avoid: guild <" .. Escape(entry.auto) .. ">"
+	else
+		text = FACES[face].label
+	end
+	local c = FACE_COLORS[face]
+	tooltip:AddLine(FaceText(face) .. " " .. text, c[1], c[2], c[3])
+	if entry and entry.note and entry.note ~= "" then
+		tooltip:AddLine(entry.note, 0.8, 0.8, 0.8, true)
+	end
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Guild rules: players in a guild whose name starts with one of db.avoidGuilds are added as :(
 ----------------------------------------------------------------------------------------------------
@@ -1248,9 +1452,10 @@ function SMA:WhoSearch()
 		Print("/who isn't available.")
 		return
 	end
-	local rules = {}
-	for _, p in ipairs(BUILTIN_GUILDS) do rules[#rules + 1] = p end
-	for _, p in ipairs(db.avoidGuilds) do rules[#rules + 1] = p end
+	-- /who g-"text" finds guild names containing the text, so it works for every match mode
+	local rules, modes = {}, {}
+	for _, p in ipairs(BUILTIN_GUILDS) do rules[#rules + 1] = p; modes[#rules] = BUILTIN_MODE end
+	for _, p in ipairs(db.avoidGuilds) do rules[#rules + 1] = p; modes[#rules] = RuleMode(p) end
 	whoRuleIndex = whoRuleIndex % #rules + 1
 	local rule = rules[whoRuleIndex]
 	whoPending = rule
@@ -1269,7 +1474,7 @@ function SMA:WhoSearch()
 			Print("/who didn't answer. Wait a few seconds and try again.")
 		end
 	end)
-	Print("Searching /who for guilds starting with \"" .. Escape(rule) .. "\"..."
+	Print("Searching /who for " .. RuleText(Escape(rule), modes[whoRuleIndex]) .. "..."
 		.. (#rules > 1 and " Search again for the next guild rule." or ""))
 end
 
@@ -1326,54 +1531,78 @@ function SMA:CheckGroup()
 	end
 end
 
--- /sma avoidguild [add|remove] <prefix>
+-- /sma avoidguild [add] [starts|contains|exact] <name>, or /sma avoidguild remove <name>
 function SMA:GuildRuleCommand(args)
-	local action, prefix = args:match("^(%S+)%s*(.-)%s*$")
+	local action, rest = args:match("^(%S+)%s*(.-)%s*$")
 	if action ~= "add" and action ~= "remove" then
-		action, prefix = (args ~= "" and "add" or nil), strtrim(args)
+		action, rest = (args ~= "" and "add" or nil), strtrim(args)
 	end
+	local mode = "start"
+	local word, after = (rest or ""):match("^(%S+)%s+(.-)$")
+	if action == "add" and word then
+		word = strlower(word)
+		if word == "starts" or word == "start" then mode, rest = "start", after
+		elseif word == "contains" then mode, rest = "contains", after
+		elseif word == "exact" then mode, rest = "exact", after
+		end
+	end
+	local name = rest or ""
 	local function IsBuiltin(p)
 		for _, b in ipairs(BUILTIN_GUILDS) do
 			if strlower(b) == strlower(p) then return b end
 		end
 	end
-	if action == "remove" and prefix ~= "" and IsBuiltin(prefix) then
-		Print("\"" .. IsBuiltin(prefix) .. "\" is built in for everyone and can't be removed.")
+	if action == "remove" and name ~= "" and IsBuiltin(name) then
+		Print("\"" .. IsBuiltin(name) .. "\" is built in for everyone and can't be removed.")
 		return
 	end
-	if action == "add" and prefix ~= "" then
-		if IsBuiltin(prefix) then Print("\"" .. IsBuiltin(prefix) .. "\" is already built in.") return end
+	if action == "add" and name ~= "" then
+		-- a built-in rule already covers the same name as "starts with" or "exact"
+		if IsBuiltin(name) then Print("\"" .. IsBuiltin(name) .. "\" is already built in.") return end
 		for _, p in ipairs(db.avoidGuilds) do
-			if strlower(p) == strlower(prefix) then Print("Already avoiding guilds starting with \"" .. p .. "\".") return end
+			if strlower(p) == strlower(name) then
+				if RuleMode(p) == mode then Print("Already avoiding " .. RuleText(p, mode) .. ".") return end
+				db.guildMatch[strlower(p)] = mode ~= "start" and mode or nil
+				Print("Changed the rule to " .. RuleText(p, mode) .. ".")
+				if UnitExists("target") then self:CheckUnitGuild("target") end
+				self:CheckGroup()
+				return
+			end
 		end
-		table.insert(db.avoidGuilds, prefix)
-		Print("Guilds starting with \"" .. prefix .. "\" are now added as " .. FaceText(FACE_AVOID) .. " when you see their members.")
+		table.insert(db.avoidGuilds, name)
+		db.guildMatch[strlower(name)] = mode ~= "start" and mode or nil
+		Print(RuleText(name, mode):gsub("^g", "G") .. " are now added as " .. FaceText(FACE_AVOID) .. " when you see their members.")
 		if UnitExists("target") then self:CheckUnitGuild("target") end
 		self:CheckGroup()
-	elseif action == "remove" and prefix ~= "" then
+	elseif action == "remove" and name ~= "" then
 		local removed
 		for i, p in ipairs(db.avoidGuilds) do
-			if strlower(p) == strlower(prefix) then removed = table.remove(db.avoidGuilds, i) break end
+			if strlower(p) == strlower(name) then removed = table.remove(db.avoidGuilds, i) break end
 		end
-		if not removed then Print("No guild rule for \"" .. prefix .. "\".") return end
+		if not removed then Print("No guild rule for \"" .. name .. "\".") return end
+		local removedMode = RuleMode(removed)
+		db.guildMatch[strlower(removed)] = nil
 		-- drop the untouched :( entries that rule added
 		local n = 0
 		for key, e in pairs(db.players) do
 			if e.auto and e.face == FACE_AVOID and not MatchGuildRule(e.auto)
-				and strlower(e.auto):sub(1, #removed) == strlower(removed) then
+				and RuleMatches(removed, removedMode, strlower(e.auto)) then
 				db.players[key] = nil
 				n = n + 1
 			end
 		end
-		Print("Removed the guild rule \"" .. removed .. "\" and " .. n .. " players it added.")
+		Print("Removed the rule for " .. RuleText(removed, removedMode) .. " and " .. n .. " players it added.")
 		if frame and frame:IsShown() then self:Refresh() end
 		if n > 0 then self:OnOwnListChanged() end
 	else
-		Print("Built in for everyone: guilds starting with " .. table.concat(BUILTIN_GUILDS, ", ") .. ".")
+		local builtin = {}
+		for _, b in ipairs(BUILTIN_GUILDS) do builtin[#builtin + 1] = "\"" .. b .. "\"" end
+		Print("Built in for everyone: guilds " .. MATCH_MODES[BUILTIN_MODE] .. " " .. table.concat(builtin, ", ") .. ".")
 		if #db.avoidGuilds == 0 then
-			Print("Your own rules: none. Add one with /sma avoidguild <start of guild name>.")
+			Print("Your own rules: none. Add one with /sma avoidguild [starts|contains|exact] <guild name>.")
 		else
-			Print("Your own rules: " .. table.concat(db.avoidGuilds, ", ") .. ".")
+			Print("Your own rules:")
+			for _, p in ipairs(db.avoidGuilds) do Print("  " .. RuleText(p, RuleMode(p))) end
 		end
 	end
 end
@@ -1686,6 +1915,7 @@ end
 
 -- Send the updated list to opted-in guild mates a few seconds after the last change.
 function SMA:OnOwnListChanged()
+	self:RefreshPlates()
 	if not db.guildShare or db.consent ~= true then return end
 	if syncTimer then syncTimer:Cancel() end
 	syncTimer = C_Timer.NewTimer(5, function()
@@ -1917,6 +2147,7 @@ events:SetScript("OnEvent", function(self, event, ...)
 		db.dismissed = db.dismissed or {}
 		if db.ignore == nil then db.ignore = true end
 		db.avoidGuilds = db.avoidGuilds or {}
+		db.guildMatch = db.guildMatch or {} -- [lowercase rule] = "contains"|"exact"; absent = starts with
 		db.autoSkip = db.autoSkip or {}
 		db.locked = db.locked or {}
 		db.guildSeen = db.guildSeen or {}
@@ -1927,9 +2158,13 @@ events:SetScript("OnEvent", function(self, event, ...)
 			end
 			db.schema = 2
 		end
-		for i = #db.avoidGuilds, 1, -1 do -- built-in rules don't need a personal copy
+		for i = #db.avoidGuilds, 1, -1 do -- built-in rules match "contains", so a personal copy adds nothing
 			for _, b in ipairs(BUILTIN_GUILDS) do
-				if strlower(db.avoidGuilds[i]) == strlower(b) then table.remove(db.avoidGuilds, i) break end
+				if strlower(db.avoidGuilds[i]) == strlower(b) then
+					db.guildMatch[strlower(b)] = nil
+					table.remove(db.avoidGuilds, i)
+					break
+				end
 			end
 		end
 		if db.shared then -- 1.0 dev builds kept one flat table of shared entries
@@ -1951,6 +2186,9 @@ events:SetScript("OnEvent", function(self, event, ...)
 		WrapInvite("InviteUnit")
 		WrapInvite("ConfirmInviteUnit")
 		AddChatFilters()
+		if TooltipDataProcessor and Enum.TooltipDataType then
+			TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Unit, OnTooltipUnit)
+		end
 		self:UnregisterEvent("ADDON_LOADED")
 	elseif event == "PARTY_INVITE_REQUEST" then
 		if db then OnPartyInviteRequest(...) end
@@ -1960,6 +2198,11 @@ events:SetScript("OnEvent", function(self, event, ...)
 		SMA:CheckUnitGuild("mouseover")
 	elseif event == "NAME_PLATE_UNIT_ADDED" then
 		SMA:CheckUnitGuild((...))
+		SMA:UpdatePlate((...))
+	elseif event == "NAME_PLATE_UNIT_REMOVED" then
+		SMA:HidePlate((...))
+	elseif event == "GUILD_INVITE_REQUEST" then
+		if db then OnGuildInviteRequest(...) end
 	elseif event == "GROUP_ROSTER_UPDATE" then
 		if db then
 			SMA:CheckGroup()
@@ -1997,6 +2240,8 @@ events:RegisterEvent("TRADE_REQUEST")
 events:RegisterEvent("PLAYER_TARGET_CHANGED")
 events:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+events:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
+events:RegisterEvent("GUILD_INVITE_REQUEST")
 events:RegisterEvent("GROUP_ROSTER_UPDATE")
 events:RegisterEvent("CHAT_MSG_WHISPER")
 events:RegisterEvent("WHO_LIST_UPDATE")
